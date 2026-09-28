@@ -1,0 +1,2 @@
+<166>Sep 27 10:30:12 fw1 : %ASA-6-302013: Built outbound TCP connection 224811914 for outside:10.0.0.1/80 to inside:192.168.10.5/53421 user jdoe
+this is not a log

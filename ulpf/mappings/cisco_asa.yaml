@@ -1,0 +1,22 @@
+mapping_version: "1.0.0"
+defaults:
+  observer.vendor: Cisco
+  observer.product: ASA
+  event.category: network
+  parse.format: syslog
+  parse.parser: cisco_asa
+  parse.status: ok
+  parse.confidence: 1.0
+actions:
+  Built:
+    event.action: built
+    event.outcome: success
+  Teardown:
+    event.action: teardown
+    event.outcome: success
+  Denied:
+    event.action: denied
+    event.outcome: failure
+  Deny:
+    event.action: deny
+    event.outcome: failure
