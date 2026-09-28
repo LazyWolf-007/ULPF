@@ -1,0 +1,1 @@
+CEF:0|Palo Alto Networks|PanOS|10.1|30514|THREAT|10|src=203.0.113.5 dst=198.51.100.1 spt=34567 dpt=443 proto=6 act=alert

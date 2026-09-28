@@ -10,19 +10,24 @@ from typing import Any, Callable, Iterable
 
 import yaml
 
+from ulpf.detect import detect, parsers_for
 from ulpf.schema import finalize_event, raw_hash
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 
-def _load_handlers() -> list[tuple[Callable[[str, dict[str, Any]], dict[str, Any] | None], dict[str, Any]]]:
-    handlers: list[tuple[Callable[[str, dict[str, Any]], dict[str, Any] | None], dict[str, Any]]] = []
+def _load_mappings() -> dict[str, dict[str, Any]]:
+    importlib.import_module("ulpf.parsers")
+    mappings: dict[str, dict[str, Any]] = {}
     mappings_dir = PACKAGE_DIR / "mappings"
-    for mapping_path in sorted(mappings_dir.glob("*.yaml")):
-        mapping = yaml.safe_load(mapping_path.read_text(encoding="utf-8")) or {}
-        module = importlib.import_module(f"ulpf.parsers.{mapping_path.stem}")
-        handlers.append((module.parse, mapping))
-    return handlers
+    for mapping_path in mappings_dir.glob("*.yaml"):
+        mappings[mapping_path.stem] = yaml.safe_load(mapping_path.read_text(encoding="utf-8")) or {}
+    return mappings
+
+
+def _mapping_for(parse: Callable[..., Any], mappings: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    stem = parse.__module__.rsplit(".", 1)[-1]
+    return mappings.get(stem, {})
 
 
 def _iter_input_files(input_dir: Path) -> Iterable[Path]:
@@ -51,7 +56,7 @@ def run(input_dir: str | Path, output_dir: str | Path) -> None:
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
 
-    handlers = _load_handlers()
+    mappings = _load_mappings()
     raw_path = destination / "raw.jsonl"
     events_path = destination / "events.jsonl"
 
@@ -77,7 +82,8 @@ def run(input_dir: str | Path, output_dir: str | Path) -> None:
 
                 parsed = None
                 mapping_version = ""
-                for parse, mapping in handlers:
+                for parse in parsers_for(detect(raw_text)):
+                    mapping = _mapping_for(parse, mappings)
                     parsed = parse(raw_text, mapping)
                     if parsed is not None:
                         mapping_version = str(mapping.get("mapping_version") or "")

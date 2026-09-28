@@ -1,0 +1,17 @@
+mapping_version: "1.0.0"
+defaults:
+  event.category: network
+  parse.format: cef
+  parse.parser: cef
+  parse.status: ok
+  parse.confidence: 1.0
+fields:
+  src: network.src_ip
+  dst: network.dst_ip
+  spt: network.src_port
+  dpt: network.dst_port
+  proto: network.transport
+  act: event.action
+protocols:
+  "6": tcp
+  "17": udp

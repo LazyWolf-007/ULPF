@@ -1,0 +1,2 @@
+date=2026-09-27 time=10:31:00 devname=FG1 srcip=172.16.1.10 srcport=1234 dstip=8.8.8.8 dstport=53 proto=17 action=deny
+date=2026-09-27 time=10:32:00 devname=FG1 srcip=203.0.113.5 srcport=41000 dstip=198.51.100.1 dstport=443 proto=6 action=deny

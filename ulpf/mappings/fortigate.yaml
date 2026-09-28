@@ -1,0 +1,24 @@
+mapping_version: "1.0.0"
+defaults:
+  observer.vendor: Fortinet
+  observer.product: FortiGate
+  event.category: network
+  parse.format: kv
+  parse.parser: fortigate
+  parse.status: ok
+  parse.confidence: 1.0
+fields:
+  srcip: network.src_ip
+  srcport: network.src_port
+  dstip: network.dst_ip
+  dstport: network.dst_port
+  proto: network.transport
+  action: event.action
+  devname: observer.name
+protocols:
+  "6": tcp
+  "17": udp
+actions:
+  deny:
+    event.action: deny
+    event.outcome: failure
