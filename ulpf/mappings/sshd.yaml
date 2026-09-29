@@ -1,0 +1,12 @@
+mapping_version: "1.0.0"
+defaults:
+  observer.product: sshd
+  event.category: authentication
+  parse.format: syslog
+  parse.parser: sshd
+  parse.status: ok
+  parse.confidence: 1.0
+actions:
+  Failed password:
+    event.action: failed password
+    event.outcome: failure

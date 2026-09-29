@@ -1,0 +1,29 @@
+mapping_version: "1.0.0"
+defaults:
+  event.category: network
+  parse.format: json
+  parse.parser: suricata
+  parse.status: ok
+  parse.confidence: 1.0
+fields:
+  timestamp: timestamp
+  src_ip: network.src_ip
+  src_port: network.src_port
+  dest_ip: network.dst_ip
+  dest_port: network.dst_port
+  proto: network.transport
+nested:
+  alert.action: event.action
+  alert.signature: event.description
+  alert.severity: event.severity
+protocols:
+  UDP: udp
+  TCP: tcp
+  ICMP: icmp
+actions:
+  allowed:
+    event.action: allowed
+    event.outcome: success
+  blocked:
+    event.action: blocked
+    event.outcome: failure
