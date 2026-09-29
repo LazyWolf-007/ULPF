@@ -22,9 +22,12 @@ def _events(tmp_path: Path) -> list[dict]:
 def test_app_counts_and_filter(tmp_path: Path) -> None:
     events = _events(tmp_path)
     counts = summarize(events)
-    assert counts["event_count"] == 8
-    assert counts["failed_parses"] == 1
-    assert counts["distinct_vendors"] == 4
+    # samples/ now also includes samples/messy.log (15 logical records: 11
+    # generic-fallback partials, 3 vendor-parsed ok, 1 genuinely failed;
+    # see tests/test_generic.py for per-record assertions).
+    assert counts["event_count"] == 23
+    assert counts["failed_parses"] == 2
+    assert counts["distinct_vendors"] == 6
     assert counts["authentication_failures"] == 1
 
     top = busiest_source_ips(events)

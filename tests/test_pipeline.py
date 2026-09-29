@@ -75,10 +75,13 @@ def test_pipeline_parses_cisco_sample_and_keeps_failed_line(tmp_path: Path) -> N
 
     events1 = _load_events(out1)
     events2 = _load_events(out2)
-    assert len(events1) == 8
+    # 8 records from the original 6 vendor samples + 15 logical records from
+    # samples/messy.log (one of which merges 3 physical lines into 1).
+    assert len(events1) == 23
     assert (out1 / "raw.jsonl").is_file()
     assert (out1 / "events.jsonl").is_file()
-    assert len((out1 / "raw.jsonl").read_text(encoding="utf-8").splitlines()) == 8
+    assert (out1 / "ocsf.jsonl").is_file()
+    assert len((out1 / "raw.jsonl").read_text(encoding="utf-8").splitlines()) == 23
 
     raw_lines = CISCO_LOG.read_text(encoding="utf-8").splitlines()
     assert raw_lines == [CISCO_OK, CISCO_GARBAGE]

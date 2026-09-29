@@ -70,6 +70,11 @@ def raw_hash(raw_text: str) -> str:
     return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
 
 
+def raw_hash_bytes(data: bytes) -> str:
+    """Hash the exact source bytes, independent of decode lossiness."""
+    return hashlib.sha256(data).hexdigest()
+
+
 def finalize_event(event: dict[str, Any]) -> dict[str, Any]:
     record = empty_event()
     for key in EVENT_KEYS:

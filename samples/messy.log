@@ -1,0 +1,17 @@
+saddr=10.0.0.9 daddr=10.0.0.10 verdict=deny protocol=tcp note=badÿbyte
+app=firewalld ts=2026-09-28T09:12:00Z src=10.4.4.4 dst=10.4.4.5 sport=2222 dport=8080 proto=tcp action=block msg=BEGIN_TRACE
+    caused by: connection refused
+	at native stack frame
+{"ts":"2026-09-28T09:05:00+05:30","srcip":"10.2.2.2","dstip":"10.2.2.3","protocol":"TCP","verdict":"blocked","msg":"Nasty Test Signature 1"}
+{"ts":"2026-09-28T09:06:00-0700","srcip":"10.2.2.4","dstip":"10.2.2.5","protocol":"UDP","verdict":"allowed","msg":"Nasty Test Signature 2"}
+LEEF:2.0|Juniper|SRX|1.0|allow|src=10.3.3.3	dst=10.3.3.4	spt=1111	dpt=443	proto=TCP	act=allow
+saddr=10.5.5.5 daddr=10.5.5.6 sport=4444 dport=9090 protocol=udp disposition=blocked
+Perimeter sensor noticed traffic from 198.51.100.9 towards 198.51.100.10 was blocked by policy 14
+flow_src=2001:0db8:0000:0000:0000:0000:0000:0001 flow_dst=2001:0db8:0000:0000:0000:0000:0000:0002 flow_action=drop flow_proto=udp
+zzz qqq xkcd fluffernutter wobblegorp squee plumbus nonsense filler filler filler filler more filler text keeps going and going without any recognizable pattern nope
+CEF:0|Zscaler|NSS|7.0|1001|Web Threat Blocked|High|sip=192.168.5.5 dip=93.184.216.34 spt=51000 dpt=443 proto=6 act=blocked
+<13>Sep 28 09:10:00 gateway myapp[555]: action=deny src=172.20.0.5 dst=172.20.0.6 sport=5000 dport=443 proto=tcp reason=policy_violation
+saddr=10.6.6.6 daddr=10.6.6.7 act=allow protocol=udp when=1758960000
+{"timestamp":"2026-09-28T09:20:00.000-04:00","event_type":"alert","src_ip":"2001:db8::10","src_port":9999,"dest_ip":"2001:db8::20","dest_port":21,"proto":"SCTP","alert":{"action":"blocked","signature":"Nasty Suricata Edge Case","severity":1}}
+PA-5220 TRAFFIC log: saddr=10.7.7.7 daddr=10.7.7.8 sport=3333 dport=443 protocol=tcp verdict=allow
+Nasty-EventLog: Source=WinDefender EventID=5157 Direction=Outbound Protocol=6 LocalAddress=10.8.8.8 LocalPort=51234 RemoteAddress=203.0.113.99 RemotePort=443 Result=Blocked
