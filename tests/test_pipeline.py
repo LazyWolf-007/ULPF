@@ -15,6 +15,7 @@ FORTIGATE_LOG = SAMPLES / "fortigate.log"
 PALOALTO_LOG = SAMPLES / "paloalto.log"
 SURICATA_LOG = SAMPLES / "suricata.log"
 SSHD_LOG = SAMPLES / "sshd.log"
+CHECKPOINT_LOG = SAMPLES / "checkpoint.log"
 
 CISCO_OK = (
     "<166>Sep 27 10:30:12 fw1 : %ASA-6-302013: Built outbound TCP connection "
@@ -39,6 +40,7 @@ SURICATA = (
     '"proto":"UDP","alert":{"action":"allowed","signature":"Allowed DNS Query","severity":2}}'
 )
 SSHD = "<38>Sep 27 10:34:00 host sshd[9999]: Failed password for alice from 10.0.0.3 port 22 ssh2"
+CHECKPOINT = "src=1.1.1.1 dst=2.2.2.2 action=Drop"
 
 
 def _load_events(out_dir: Path) -> list[dict]:
@@ -73,10 +75,10 @@ def test_pipeline_parses_cisco_sample_and_keeps_failed_line(tmp_path: Path) -> N
 
     events1 = _load_events(out1)
     events2 = _load_events(out2)
-    assert len(events1) == 7
+    assert len(events1) == 8
     assert (out1 / "raw.jsonl").is_file()
     assert (out1 / "events.jsonl").is_file()
-    assert len((out1 / "raw.jsonl").read_text(encoding="utf-8").splitlines()) == 7
+    assert len((out1 / "raw.jsonl").read_text(encoding="utf-8").splitlines()) == 8
 
     raw_lines = CISCO_LOG.read_text(encoding="utf-8").splitlines()
     assert raw_lines == [CISCO_OK, CISCO_GARBAGE]
@@ -84,6 +86,7 @@ def test_pipeline_parses_cisco_sample_and_keeps_failed_line(tmp_path: Path) -> N
     assert PALOALTO_LOG.read_text(encoding="utf-8").splitlines() == [PALOALTO]
     assert SURICATA_LOG.read_text(encoding="utf-8").splitlines() == [SURICATA]
     assert SSHD_LOG.read_text(encoding="utf-8").splitlines() == [SSHD]
+    assert CHECKPOINT_LOG.read_text(encoding="utf-8").splitlines() == [CHECKPOINT]
 
     by_text = _by_text(events1)
     for event in events1:
@@ -179,7 +182,32 @@ def test_pipeline_parses_cisco_sample_and_keeps_failed_line(tmp_path: Path) -> N
     assert sshd["event.category"] == "authentication"
     assert sshd["parse.status"] == "ok"
 
+    checkpoint = by_text[CHECKPOINT]
+    assert checkpoint["observer.vendor"] == "Check Point"
+    assert checkpoint["network.src_ip"] == "1.1.1.1"
+    assert checkpoint["network.dst_ip"] == "2.2.2.2"
+    assert checkpoint["event.action"] == "Drop"
+    assert checkpoint["event.outcome"] == "failure"
+    assert checkpoint["parse.format"] == "kv"
+    assert checkpoint["parse.status"] == "ok"
+
     by_text2 = _by_text(events2)
-    for raw in (CISCO_OK, CISCO_GARBAGE, FG1, FG2, PALOALTO, SURICATA, SSHD):
+    for raw in (CISCO_OK, CISCO_GARBAGE, FG1, FG2, PALOALTO, SURICATA, SSHD, CHECKPOINT):
         assert by_text[raw]["provenance.raw_hash"] == by_text2[raw]["provenance.raw_hash"]
         assert by_text[raw]["provenance.raw_hash"] == _sha256(raw)
+
+
+def test_checkpoint_does_not_require_pipeline_edit(tmp_path: Path) -> None:
+    source = (ROOT / "ulpf" / "pipeline.py").read_text(encoding="utf-8")
+    assert "checkpoint" not in source
+    assert "Check Point" not in source
+
+    out = tmp_path / "out"
+    run(SAMPLES, out)
+    event = _by_text(_load_events(out))[CHECKPOINT]
+    assert event["observer.vendor"] == "Check Point"
+    assert event["network.src_ip"] == "1.1.1.1"
+    assert event["network.dst_ip"] == "2.2.2.2"
+    assert event["event.action"] == "Drop"
+    assert event["event.outcome"] == "failure"
+    assert event["parse.format"] == "kv"

@@ -2,30 +2,22 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-
-import yaml
-
-from ulpf.detect import is_registered, register
-
-_MAPPINGS_DIR = Path(__file__).resolve().parent.parent / "mappings"
+from types import ModuleType
 
 
-def _discover() -> None:
+def _import_parser_modules() -> list[ModuleType]:
     here = Path(__file__).parent
+    modules: list[ModuleType] = []
     for path in sorted(here.glob("*.py")):
         if path.stem == "__init__":
             continue
-        module = importlib.import_module(f"{__package__}.{path.stem}")
-        parse = getattr(module, "parse", None)
-        if parse is None or is_registered(parse):
-            continue
-        mapping_path = _MAPPINGS_DIR / f"{path.stem}.yaml"
-        if not mapping_path.is_file():
-            continue
-        mapping = yaml.safe_load(mapping_path.read_text(encoding="utf-8")) or {}
-        fmt = (mapping.get("defaults") or {}).get("parse.format")
-        if fmt:
-            register(fmt, parse)
+        modules.append(importlib.import_module(f"{__package__}.{path.stem}"))
+    return modules
 
 
-_discover()
+PARSER_MODULES = _import_parser_modules()
+
+
+def register_all(registry) -> None:
+    for module in PARSER_MODULES:
+        module.register(registry)

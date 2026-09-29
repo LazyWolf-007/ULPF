@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ulpf.detect import register
-
 CEF_RE = re.compile(
     r"^CEF:(?P<version>[^|]*)\|"
     r"(?P<vendor>[^|]*)\|"
@@ -57,4 +55,5 @@ def parse(line: str, mapping: dict[str, Any]) -> dict[str, Any] | None:
     return event
 
 
-register("cef", parse)
+def register(registry) -> None:
+    registry.register("cef", parse)

@@ -1,0 +1,16 @@
+mapping_version: "1.0.0"
+defaults:
+  observer.vendor: Check Point
+  event.category: network
+  parse.format: kv
+  parse.parser: checkpoint
+  parse.status: ok
+  parse.confidence: 1.0
+fields:
+  src: network.src_ip
+  dst: network.dst_ip
+  action: event.action
+actions:
+  Drop:
+    event.action: Drop
+    event.outcome: failure

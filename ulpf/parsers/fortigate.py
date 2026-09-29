@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ulpf.detect import register
-
 KV_RE = re.compile(r"(\w+)=(\S+)")
 PORT_FIELDS = {"network.src_port", "network.dst_port"}
 
@@ -50,4 +48,5 @@ def parse(line: str, mapping: dict[str, Any]) -> dict[str, Any] | None:
     return event
 
 
-register("kv", parse)
+def register(registry) -> None:
+    registry.register("kv", parse)

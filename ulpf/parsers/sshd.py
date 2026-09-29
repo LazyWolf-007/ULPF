@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ulpf.detect import register
-
 SSHD_RE = re.compile(
     r"^<(?P<pri>\d+)>"
     r"(?P<timestamp>\w+\s+\d+\s+\d{2}:\d{2}:\d{2})\s+"
@@ -42,4 +40,5 @@ def parse(line: str, mapping: dict[str, Any]) -> dict[str, Any] | None:
     return event
 
 
-register("syslog", parse)
+def register(registry) -> None:
+    registry.register("syslog", parse)

@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ulpf.detect import register
-
 PORT_FIELDS = {"network.src_port", "network.dst_port"}
 
 
@@ -65,4 +63,5 @@ def parse(line: str, mapping: dict[str, Any]) -> dict[str, Any] | None:
     return event
 
 
-register("json", parse)
+def register(registry) -> None:
+    registry.register("json", parse)

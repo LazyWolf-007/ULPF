@@ -55,3 +55,7 @@ def parse(line: str, mapping: dict[str, Any]) -> dict[str, Any] | None:
         "pri": header.group("pri"),
     }
     return event
+
+
+def register(registry) -> None:
+    registry.register("syslog", parse)

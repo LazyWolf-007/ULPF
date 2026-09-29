@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 import uuid
@@ -10,14 +9,16 @@ from typing import Any, Callable, Iterable
 
 import yaml
 
+from ulpf import detect as detect_mod
 from ulpf.detect import detect, parsers_for
+from ulpf.parsers import register_all
 from ulpf.schema import finalize_event, raw_hash
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 
 def _load_mappings() -> dict[str, dict[str, Any]]:
-    importlib.import_module("ulpf.parsers")
+    register_all(detect_mod)
     mappings: dict[str, dict[str, Any]] = {}
     mappings_dir = PACKAGE_DIR / "mappings"
     for mapping_path in mappings_dir.glob("*.yaml"):
