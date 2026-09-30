@@ -48,6 +48,12 @@ python -m ulpf.export splunk out --index security
 python -m ulpf.export parquet out   # requires `pip install pyarrow`
 ```
 
+Onboard a device with no dedicated parser, using a local model instead of writing one by hand (see "Offline LLM parser generator" below):
+
+```bash
+python -m ulpf.llm.generate --samples my_new_vendor_lines.txt --vendor "New Vendor"
+```
+
 ## Output files
 
 **`raw.jsonl`** — One JSON object per logical record: raw event id, exact `raw_text`, SHA-256 `raw_hash`, source file name, ingest timestamp, `raw_text_lossy`, and `raw_bytes_b64`. Use this when you need the untouched line or to verify hashing. A "logical record" merges an indented continuation line (leading space/tab) onto the line above it, so a multiline entry (e.g. a stack trace under a log line) becomes one record, not several broken ones. `raw_hash` is always computed over the exact original bytes, not the decoded text. If a line isn't valid UTF-8, it's decoded with `errors="replace"` for `raw_text`, `raw_text_lossy` is set to `true`, and the exact original bytes are kept losslessly in base64 in `raw_bytes_b64` (empty otherwise).
@@ -88,9 +94,20 @@ When no registered parser recognizes a line, `ulpf/parsers/generic.py` runs as t
 - **`to_splunk_hec(events, source=..., sourcetype=..., index=...)`** — NDJSON for Splunk's HTTP Event Collector: `{"event": ..., "time": ..., "source": ..., "sourcetype": ...}` per line, converting OCSF's epoch-millisecond `time` to the epoch-seconds HEC expects.
 - **`to_parquet(events, path)`** — writes a Parquet file. Needs the optional `pyarrow` dependency (`pip install pyarrow`; deliberately not in `requirements.txt`, per "minimal dependencies") — raises a clear `RuntimeError` if it's missing.
 
+## Offline LLM parser generator
+
+`python -m ulpf.llm.generate --samples <file> [--vendor NAME] [--auto-approve]` turns 3-10 sample lines from a device with no dedicated parser into a working one, using a local model instead of hand-writing `ulpf/parsers/<name>.py` + `ulpf/mappings/<name>.yaml`:
+
+1. **Generate.** `ulpf/llm/client.py` sends the samples (plus one few-shot example mapping and the target JSON schema) to a local Ollama model (default `qwen2.5-coder:3b`, override with `--model` or env `ULPF_LLM_MODEL`) via `http://127.0.0.1:11434/api/generate` — or any OpenAI-compatible local server with `--backend openai --base-url ...`. Both backends **refuse to construct against a non-loopback host** — checked before any network I/O. The model outputs only a JSON config (vendor, format, a regex with named groups, a field map, action rules) — never Python code.
+2. **Validate.** `ulpf/llm/validator.py` checks the config's schema, that the regex compiles and shows no catastrophic backtracking (a real subprocess-based timeout guard — see SPEC.md for why a thread-based one doesn't work), that it matches >= 80% of the sample lines, and that src/dst IP, timestamp, and action get extracted wherever they're plainly present. `ulpf/llm/generator.py` retries up to twice, feeding the validator's errors back into the prompt.
+3. **Approve.** The CLI prints the config and the validation report, then asks `y/n` (skip with `--auto-approve` — which refuses to approve a config that failed validation; a human can still override interactively).
+4. **Save.** On approval, `ulpf/mappings/<vendor>.yaml` is written (marked `generator: ulpf.llm`) and `out/onboarding.json` gets a `{vendor, seconds, validator_score, approved_at}` record. `ulpf/parsers/dynamic.py` loads every such config at the next process start (`ulpf.pipeline.run`, `ulpf.ingest.IngestServer`, ...) and registers it under its `format_hint` — no new Python file per vendor, and hand-written parsers always get first refusal on a line.
+
+If Ollama isn't available, `--replay <saved_config.json>` loads a previously generated config and runs it through the same validate/approve/save flow with no model call.
+
 ## Air-gap
 
-ULPF does not open outbound network connections. The listeners are the optional local viewer in `ulpf/app.py` and the optional syslog listener in `ulpf/ingest.py`, both bound to `127.0.0.1` on your machine by default. `ulpf/export.py` only writes local files/stdout — it never calls out to OpenSearch, Splunk, or anywhere else itself. No API keys or cloud credentials are used.
+ULPF does not open outbound network connections. The listeners are the optional local viewer in `ulpf/app.py` and the optional syslog listener in `ulpf/ingest.py`, both bound to `127.0.0.1` on your machine by default. `ulpf/export.py` only writes local files/stdout — it never calls out to OpenSearch, Splunk, or anywhere else itself. `ulpf/llm/client.py` only ever talks to a local model server (default `127.0.0.1:11434`) and raises `NonLoopbackHostError` before any network I/O if pointed anywhere else. No API keys or cloud credentials are used anywhere in this project.
 
 ## Sample files (what to check)
 

@@ -320,6 +320,209 @@ ULPF's air-gap rule.
   the correct fix, not a workaround. `pyarrow` missing raises `RuntimeError`
   with an install hint rather than a raw `ImportError` traceback.
 
+## Offline LLM parser generator (`ulpf/llm/`, `ulpf/parsers/dynamic.py`)
+
+Four files under `ulpf/llm/`, one under `ulpf/parsers/`:
+
+- `client.py` - transport only (Ollama native or OpenAI-compatible), loopback-enforced, urllib-only.
+- `generator.py` - builds the few-shot prompt, runs the generate -> validate -> retry loop.
+- `validator.py` - the five checks (schema, regex safety, match rate, required-field coverage, report).
+- `generate.py` - the CLI (`python -m ulpf.llm.generate`): read samples, generate, show, approve, save.
+- `ulpf/parsers/dynamic.py` - loads approved configs from `ulpf/mappings/*.yaml` at registration time.
+
+None of this executes model-authored code. `line_regex` only ever reaches
+`re.compile(...).match(...)` - in the validator (checking it), in
+`dynamic.py` (running it at parse time), and nowhere else. There is no
+`eval`/`exec` in any of these files.
+
+### Client (`ulpf/llm/client.py`)
+
+`OllamaClient.generate(prompt)` POSTs to `http://<host>:<port>/api/generate`
+with `stream: false`, `format: "json"`, `options.temperature: 0` (deterministic
+output) and returns the `response` field's text. `OpenAICompatClient` does
+the same against `<base_url>/chat/completions` (`response_format:
+{"type": "json_object"}`), for `--backend openai` (e.g. llama.cpp's server,
+LM Studio). Both constructors call `require_loopback(host)` - checked
+against a fixed allow-list (`127.0.0.1`, `localhost`, `::1`), not a DNS
+resolve-and-check - **before any socket is opened**, raising
+`NonLoopbackHostError` immediately for anything else. A connection failure
+(Ollama not running) raises `LLMConnectionError` with a message pointing at
+`--replay` as the fallback, rather than a raw `URLError` traceback.
+
+Model defaults to `qwen2.5-coder:3b`; resolution order is `--model` flag >
+`ULPF_LLM_MODEL` env var > the built-in default (in that order - `--model`
+was initially given an argparse `default=`, which meant the env var could
+never actually take effect since the flag always looked "explicitly set";
+fixed by defaulting `--model` to `None` and resolving the three-way
+precedence by hand after parsing).
+
+### Prompt (`ulpf/llm/generator.py`, `build_prompt`)
+
+One real, hand-written mapping (`fortigate.yaml`, read from disk so it can
+never drift from the actual file) is included as few-shot *style* context;
+a second (`cisco_asa.yaml`) is added only when the model name contains a
+size tag of `7b` or larger (item 12: keep the prompt under ~1500 tokens,
+one example unless the model is 7b+). The target *schema* is given
+separately and is deliberately different from - and more constrained than
+- the example mappings' own shape (see "Config schema" below).
+
+**A real-model run during development surfaced a genuine prompt weakness**,
+kept here because it's a concrete, verified finding, not speculation: a 3b
+model reversed `field_map`'s key/value direction, writing
+`{"srcip": "network.src_ip"}` instead of `{"network.src_ip": "src_ip"}`.
+The likely cause: `fortigate.yaml`'s own `fields:` section maps
+`raw-log-key -> internal-field` (e.g. `srcip: network.src_ip`) - the
+*opposite* direction from what `field_map` wants - and the model appears to
+have anchored on that example's left-hand key names. The prompt now says so
+explicitly ("this is the OPPOSITE direction from the example mapping's
+`fields:` section above - do not reuse its left-hand key names"). This fix
+was verified only against the existing mocked-client test suite, not
+against another real model call (real-model calls are reserved for manual
+testing outside this build, per the task that added this feature).
+
+Retries (default up to 2, so 3 attempts total) feed the previous attempt's
+JSON and `ValidationReport.error_summary()` back into the next prompt,
+asking the model to fix exactly that.
+
+### Config schema (`ulpf/llm/validator.py`)
+
+```json
+{
+  "vendor": "string",
+  "product": "string",
+  "format_hint": "json | cef | leef | kv | syslog | unknown",
+  "line_regex": "a Python re pattern with named groups, applied with re.match",
+  "field_map": {"<internal field>": "<regex group name>"},
+  "action_rules": [{"match": "<raw captured action value>", "action": "<canonical action>"}],
+  "timestamp_format": "free-text description",
+  "category": "network | authentication"
+}
+```
+
+`field_map` keys are restricted to a fixed allow-list
+(`validator.ALLOWED_FIELD_MAP_TARGETS`) - a subset of `schema.EVENT_KEYS`
+that excludes identity/provenance/parse-status fields the pipeline owns,
+not the config (`event_id`, `parse.*`, `provenance.*`, `unmapped`). An
+unknown key is a schema error, not a silently-ignored no-op - this is what
+turns a hallucinated field name into concrete, actionable retry feedback
+("field_map key 'srcip' is not a valid target field; use one of [...]")
+instead of a config that silently drops data at runtime.
+
+### Validation (`ulpf/llm/validator.validate`)
+
+1. **Schema.** Required keys present with the right types; `format_hint` in
+   the allowed set; every `field_map` key in the allow-list above; every
+   `action_rules` entry has `match`/`action`; every string value anywhere
+   in the config (recursively) is scanned for code-like markers (`"import
+   "`, `"def "`, `"eval("`, `"__import__"`, ...) and rejected if found -
+   defense in depth for "never Python code", on top of the config never
+   being `eval`'d regardless.
+2. **Regex safety.** `re.compile` must succeed, then a catastrophic-
+   backtracking guard runs the pattern against 2 short adversarial strings
+   (`"a"*30 + "!"`, `"0"*30 + "x"`) with a 1-second-per-string timeout.
+   **This guard uses a subprocess, not a thread, and that's not
+   incidental** - verified directly during development: CPython's `re`
+   engine does not release the GIL during a match, so a thread-based
+   `concurrent.futures.ThreadPoolExecutor` timeout left the *entire
+   interpreter* unresponsive for 30+ seconds on `^(a+)+$` against the exact
+   stress string used here (the timeout call itself couldn't get scheduled
+   to fire). A `multiprocessing` child process can be `.terminate()`d
+   regardless of what it's stuck doing internally, so that's what's used -
+   confirmed working (correctly flags the catastrophic pattern in ~1s,
+   passes a safe pattern in ~0.1s) before being wired into the real
+   validator. If even spawning the probe process fails (`OSError`), the
+   regex is conservatively treated as unsafe rather than assumed fine.
+3. **Match rate.** The regex (via `.match`, matching exactly how
+   `dynamic.py` uses it at runtime - same semantics in both places on
+   purpose) must match >= 80% of the sample lines.
+4. **Required-field coverage.** For each sample line, independent oracle
+   regexes (the *same* ones `ulpf/parsers/generic.py` uses for its own
+   heuristic fallback - `IPV4_RE`/`IPV6_RE`/`ISO_TS_RE`/`SYSLOG_TS_RE`/
+   `ACTION_RE`, imported directly rather than re-implemented) decide
+   whether that line plainly contains a src/dst IP, a timestamp, or an
+   action word; `required_field_rate` is the fraction of those that the
+   config's own regex+field_map actually captured.
+5. **Report.** `ValidationReport(ok, score, schema_errors, regex_error,
+   catastrophic_backtracking, match_rate, required_field_rate, per_line)`.
+   `ok` requires match_rate >= 0.8 (schema/regex/backtracking failures
+   short-circuit to `ok=False` immediately, before match rate is even
+   computed). `score = 0.6 * match_rate + 0.4 * required_field_rate`.
+   `check_backtracking=False` skips step 2 - used by `generator.py`'s
+   retry-loop tests, which are exercising retry behavior, not regex
+   safety, to keep the (otherwise subprocess-spawning) test suite fast;
+   the CLI and the dedicated validator tests always leave it on.
+   `validate_schema_only(config)` runs steps 1-2 with no sample lines, for
+   `--replay` without `--samples`.
+
+### Dynamic parser loading (`ulpf/parsers/dynamic.py`)
+
+"No new Python file per vendor": one module handles every LLM-onboarded
+vendor. `register(registry)` scans `ulpf/mappings/*.yaml` for configs
+carrying `generator: "ulpf.llm"` (written by `generate.py` on approval;
+absent from every hand-written mapping, so `dynamic._load_dynamic_configs`
+never picks those up) and builds one closure per vendor via `_make_parser`,
+registered under that vendor's own `format_hint`.
+
+**Existing parsers keep priority.** `ulpf/parsers/__init__.py`'s module
+discovery sorts `dynamic` to load *last*, regardless of alphabetical
+position (`paths.sort(key=lambda p: (p.stem == "dynamic", p.stem))`) - not
+an accident of filename ordering. Since the registry tries parsers for a
+given format in registration order and stops at the first non-`None`
+result, every hand-written vendor parser always gets first refusal on a
+line before any dynamic one is tried, for every format. Verified directly:
+a deliberately over-broad dynamic "kv" config that *would* match a
+FortiGate-shaped line never actually claims one, because `fortigate.py`
+(registered first) already returns a result for it
+(`test_existing_hand_written_parser_still_wins_over_a_dynamic_one`).
+
+**Registration is idempotent per file, not just per process.**
+`register()` runs once per `ulpf.pipeline.load_mappings()` call - i.e.
+every `ulpf.pipeline.run()` and every `ulpf.ingest.IngestServer` start -
+and `ulpf/detect.py`'s `register()` dedupes repeat registrations by
+function *identity*. A closure built fresh from the same YAML file on every
+call would never be `is` any previous closure, so the registry would grow
+without bound across repeated runs in one process. `dynamic._PARSER_CACHE`
+(keyed by mapping file path) avoids this by reusing the same closure object
+for a given path across calls - the same reason hand-written parsers don't
+have this problem (their `parse` function is a single module-level def,
+never recreated). Trade-off: editing a dynamic mapping's YAML in place
+without restarting the process won't be picked up mid-session - the same
+limitation every hand-written parser's *code* already has (only its
+mapping's *content* hot-reloads per line, never its code), so this isn't a
+new inconsistency.
+
+A malformed/hand-edited dynamic config (bad regex, missing keys) is skipped
+silently at registration time rather than raised - a broken one-vendor
+config must never take down the whole pipeline at startup.
+
+### CLI (`ulpf/llm/generate.py`)
+
+`python -m ulpf.llm.generate --samples <file> [--vendor NAME] [--auto-approve]
+[--model NAME] [--backend ollama|openai] [--host H] [--port P] [--base-url URL]
+[--out-dir DIR] [--replay saved_config.json]`
+
+Flow: generate (or replay) -> print config + validation report -> `y/n`
+prompt (skipped by `--auto-approve`) -> on approval, write
+`ulpf/mappings/<slugified-vendor>.yaml` (with `generator: ulpf.llm` added)
+and append a `{vendor, seconds, validator_score, approved_at}` record to
+`<out-dir>/onboarding.json` (a JSON array - one record per approved
+onboarding over time, not overwritten, so it doubles as a history/audit
+log).
+
+`--auto-approve` refuses to approve a config that failed validation
+(`report.ok is False`) - exits `5` instead, printing why. A human
+approving interactively can still override and save it anyway (the prompt
+prints an explicit warning first) - `--auto-approve` exists for unattended/
+demo automation, where silently saving a known-bad config would be the
+wrong default; a human in the loop can make that call, an unattended flag
+should not.
+
+`--replay <path>` loads a previously saved JSON config with **no model
+call at all** - the demo-safety fallback for when Ollama isn't reachable.
+With `--samples` also given, the replayed config is validated normally
+against them; without `--samples`, `validate_schema_only` still checks it's
+well-formed rather than trusting a replay file blindly.
+
 ## Manual verification
 
 ```bash
@@ -389,3 +592,30 @@ python -m ulpf.export parquet out
   `{"index": {...}}` and the event itself.
 - `out/export.parquet` exists and (with `pyarrow` installed) reads back the
   same row count as `out/ocsf.jsonl` has lines.
+
+And the LLM parser generator, with no model running (demo-safe, no Ollama needed):
+
+```bash
+echo 'src=10.9.9.1 dst=10.9.9.2 act=deny' > /tmp/samples.txt
+echo 'src=10.9.9.3 dst=10.9.9.4 act=allow' >> /tmp/samples.txt
+echo 'src=10.9.9.5 dst=10.9.9.6 act=deny' >> /tmp/samples.txt
+cat > /tmp/config.json <<'EOF'
+{"vendor": "DemoVendor", "product": "DemoBox", "format_hint": "kv",
+ "line_regex": "^src=(?P<src_ip>\\S+) dst=(?P<dst_ip>\\S+) act=(?P<action>\\S+)$",
+ "field_map": {"network.src_ip": "src_ip", "network.dst_ip": "dst_ip", "event.action": "action"},
+ "action_rules": [{"match": "deny", "action": "deny"}],
+ "timestamp_format": "none", "category": "network"}
+EOF
+python -m ulpf.llm.generate --replay /tmp/config.json --samples /tmp/samples.txt --auto-approve
+python -m ulpf.pipeline samples out   # (with a matching line dropped into samples/)
+```
+
+- The validation report prints `ok: True`, `match_rate: 100%`.
+- `ulpf/mappings/demovendor.yaml` is created, with `generator: ulpf.llm` in it.
+- `out/onboarding.json` gains a record with `"vendor": "DemoVendor"`.
+- A fresh `python -m ulpf.pipeline` run (new process) against a line shaped
+  like the samples now reports `parse.status: "ok"`,
+  `parse.parser: "llm:DemoVendor"` - proving the mapping is live without
+  any code change, not just validated in isolation.
+- Passing a non-loopback `--host` (e.g. `--host 8.8.8.8`) exits immediately
+  with a `NonLoopbackHostError` message, before any network attempt.

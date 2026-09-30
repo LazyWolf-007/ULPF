@@ -38,8 +38,16 @@ the ingest → detect → parse → map → serve flow.
   (observer, network, user, event, parse, provenance, unmapped).
 - `ulpf/app.py` — read-only local HTML viewer over `events.jsonl`, stdlib HTTP server
   on `127.0.0.1`, optional `--rebuild` to re-run the pipeline first.
+- `ulpf/parsers/generic.py` — fallback parser (structural + heuristic), used only when no
+  registered parser matches; `ulpf/parsers/dynamic.py` — loads LLM-approved configs from
+  `ulpf/mappings/*.yaml` (marked `generator: "ulpf.llm"`), registered last so hand-written
+  parsers always get first refusal.
+- `ulpf/ocsf.py`, `ulpf/quality.py`, `ulpf/verify.py`, `ulpf/ingest.py`, `ulpf/export.py` —
+  OCSF export, data-quality report, integrity verification, live syslog ingest, SIEM exporters.
+- `ulpf/llm/` — offline LLM parser generator (`client.py`/`generator.py`/`validator.py`/
+  `generate.py`); see SPEC.md's "Offline LLM parser generator" section.
 - `samples/` — one sample log file per device type, used by tests and manual checks.
-- `tests/test_pipeline.py`, `tests/test_app.py` — the test suite; run before/after changes.
+- `tests/` — the test suite; run before/after every change.
 
 ## Adding a new device/parser
 
