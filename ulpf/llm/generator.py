@@ -1,10 +1,14 @@
-"""Builds the few-shot prompt and runs the generate -> validate -> retry loop.
+"""Builds the prompt and runs the generate -> validate -> retry loop.
 
-The model never sees or writes Python code: the prompt asks for exactly one
-JSON object matching the schema in `ulpf.llm.validator`, and every attempt
-is checked with `validator.validate` before being accepted. Up to
-`max_retries` retries feed the previous attempt and its validator error
-summary back into the prompt, so the model can self-correct.
+The model never sees raw lines for a structured format and never writes
+the regex that pulls fields out of them. `ulpf.llm.structure` tokenizes
+the samples; the prompt shows each source key with up to two example
+values and asks for a field map. Regex mode is only the fallback for
+unstructured text, and that pattern is capped at 6 capture groups.
+
+Every attempt is checked with `validator.validate`. Up to `max_retries`
+retries feed the previous attempt, the validator error summary, and the
+names of required fields that are still unmapped back into the prompt.
 """
 
 from __future__ import annotations
@@ -12,23 +16,14 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Protocol
 
-from ulpf.llm import validator
+from ulpf.llm import structure, validator
 
-PACKAGE_DIR = Path(__file__).resolve().parent.parent  # .../ulpf
-MAPPINGS_DIR = PACKAGE_DIR / "mappings"
-
-# Two real, hand-written mappings covering the two most common line shapes
-# (key=value, syslog-with-header) - used as style/structure context only;
-# the model's *output* schema (below) is deliberately different and
-# stricter. Read from disk (not hardcoded) so the examples never drift out
-# of sync with the actual files.
-FEW_SHOT_KV_STYLE = "fortigate.yaml"
-FEW_SHOT_SYSLOG_STYLE = "cisco_asa.yaml"
-
-_LARGE_MODEL_TAGS = ("7b", "8b", "13b", "14b", "22b", "32b", "34b", "70b")
+# The first prompt (no retry suffix) stays under this. ~4 characters per
+# token is a conservative stand-in for a real tokenizer; the prompt is
+# key names and two short examples, not raw lines or few-shot YAML.
+PROMPT_TOKEN_BUDGET = 800
 
 
 class LLMClient(Protocol):
@@ -44,42 +39,89 @@ class GenerationResult:
     raw_responses: list[str] = field(default_factory=list)
 
 
-def _model_is_large(model: str) -> bool:
-    lowered = model.lower()
-    return any(tag in lowered for tag in _LARGE_MODEL_TAGS)
+def estimate_tokens(text: str) -> int:
+    """Rough upper bound used to keep the structured prompt small."""
+    return (len(text) + 3) // 4
 
 
-def _load_example(name: str) -> str:
-    return (MAPPINGS_DIR / name).read_text(encoding="utf-8").strip()
+def _field_list() -> str:
+    return ", ".join(sorted(validator.ALLOWED_FIELD_MAP_TARGETS))
 
 
-def _schema_block() -> str:
-    formats = ", ".join(sorted(validator.REQUIRED_FORMAT_HINTS))
-    fields = ", ".join(sorted(validator.ALLOWED_FIELD_MAP_TARGETS))
-    return (
-        "Output ONLY one JSON object - no prose, no markdown fences, no code - "
-        "with exactly these keys:\n"
-        "{\n"
-        '  "vendor": "<short vendor name>",\n'
-        '  "product": "<short product name>",\n'
-        f'  "format_hint": "<one of: {formats}>",\n'
-        '  "line_regex": "<a Python re pattern with named groups, applied with re.match>",\n'
-        '  "field_map": {"<internal field>": "<regex group name>"},\n'
-        '  "action_rules": [{"match": "<raw captured action value>", "action": "<canonical action>"}],\n'
-        '  "timestamp_format": "<free-text description of the captured timestamp shape>",\n'
-        '  "category": "<network or authentication>"\n'
-        "}\n"
-        f"Valid field_map keys (the ONLY strings allowed on the left): {fields}.\n"
-        "field_map direction: KEY is one of those internal field names, VALUE is "
-        "your regex group name - e.g. if your regex has (?P<ip1>...), and that "
-        "group is the source IP, write \"network.src_ip\": \"ip1\". This is the "
-        "OPPOSITE direction from the example mapping's \"fields:\" section above "
-        "(which maps raw-log-key -> internal-field) - do not reuse its left-hand "
-        "key names (like \"srcip\") as field_map keys; only the internal field "
-        "names listed above are valid there.\n"
-        "line_regex must match from the start of the line and use a named "
-        "group (?P<name>...) for every piece of data you extract."
+def _retry_suffix(
+    previous_attempt: dict[str, Any] | None,
+    previous_errors: str | None,
+    unmapped_required: list[str] | None,
+) -> str:
+    if previous_attempt is None:
+        return ""
+    lines = [
+        "Your previous attempt was:",
+        json.dumps(previous_attempt, ensure_ascii=False),
+        "It failed validation: " + (previous_errors or "unknown error"),
+    ]
+    if unmapped_required:
+        lines.append("Unmapped required fields: " + ", ".join(unmapped_required))
+        lines.append("Map each of these internal fields from the keys or groups above.")
+    return "\n" + "\n".join(lines)
+
+
+def _structured_prompt(
+    samples: list[str],
+    vendor_hint: str | None,
+    detected: str,
+    previous_attempt: dict[str, Any] | None,
+    previous_errors: str | None,
+    unmapped_required: list[str] | None,
+) -> str:
+    examples = structure.example_values(samples, limit=2)
+    key_lines = [f"  {key}: {' | '.join(values)}" for key, values in examples.items()]
+    keys_block = "\n".join(key_lines) if key_lines else "  (none)"
+    vendor = f"Vendor hint: {vendor_hint}\n" if vendor_hint else ""
+    shape = (
+        '{"vendor":"","product":"","mode":"' + detected + '",'
+        '"field_map":{"<internal>":"<source key>"},'
+        '"action_rules":[{"match_value":"<raw>","action":"<canonical>"}],'
+        '"timestamp":{"keys":[],"format":""},"category":"network"}'
     )
+    body = (
+        "Map log fields for ULPF. Reply with one JSON object only.\n"
+        f"Detected mode: {detected}\n"
+        "Source keys and up to two example values:\n"
+        f"{keys_block}\n"
+        "Fill field_map. Use only the source keys above. Do not output a regular expression.\n"
+        f'mode must be "{detected}".\n'
+        "field_map key is an internal field; field_map value is a source key.\n"
+        f"Internal fields: {_field_list()}\n"
+        f"JSON: {shape}\n"
+        f"{vendor}"
+        "category is network or authentication."
+    )
+    return body + _retry_suffix(previous_attempt, previous_errors, unmapped_required)
+
+
+def _regex_prompt(
+    samples: list[str],
+    vendor_hint: str | None,
+    previous_attempt: dict[str, Any] | None,
+    previous_errors: str | None,
+    unmapped_required: list[str] | None,
+) -> str:
+    shown = "\n".join(f"{index + 1}. {line[:180]}" for index, line in enumerate(samples[:8]))
+    vendor = f"Vendor hint: {vendor_hint}\n" if vendor_hint else ""
+    body = (
+        "These log lines have no kv, JSON, CEF, or syslog key structure.\n"
+        'Reply with one JSON object only. mode must be "regex".\n'
+        f"line_regex: a Python re pattern applied with re.match, at most "
+        f"{structure.MAX_CAPTURE_GROUPS} named capture groups.\n"
+        "field_map maps an internal field to a group name.\n"
+        f"Internal fields: {_field_list()}\n"
+        "JSON keys: vendor, product, mode, line_regex, field_map, "
+        "action_rules [{match_value, action}], timestamp {keys, format}, category.\n"
+        f"{vendor}"
+        f"Lines:\n{shown}"
+    )
+    return body + _retry_suffix(previous_attempt, previous_errors, unmapped_required)
 
 
 def build_prompt(
@@ -88,45 +130,73 @@ def build_prompt(
     model: str,
     previous_attempt: dict[str, Any] | None = None,
     previous_errors: str | None = None,
+    unmapped_required: list[str] | None = None,
 ) -> str:
-    """Assemble the prompt: few-shot example(s) + target schema + samples.
+    """Assemble the prompt. `model` is accepted for callers; size no longer changes the prompt.
 
-    Item 12: keep this under ~1500 tokens and use only ONE few-shot example
-    unless the model is 7b+ - a single real mapping (~15-25 lines of YAML)
-    plus the schema plus up to 10 sample lines comfortably fits that budget;
-    a second example roughly doubles the example-YAML portion, which is
-    still fine for a larger model's context but wasted on a 3b one.
+    Structured samples: source keys and two example values, asking only
+    for field_map (plus the short shell of vendor/product/mode/rules/
+    timestamp/category). Unstructured samples: the lines themselves and a
+    regex capped at 6 capture groups.
     """
-    example_names = [FEW_SHOT_KV_STYLE]
-    if _model_is_large(model):
-        example_names.append(FEW_SHOT_SYSLOG_STYLE)
-    example_blocks = [
-        f"# Existing hand-written mapping ({name}) - for style/context only, "
-        f"your output schema is different (given below):\n{_load_example(name)}"
-        for name in example_names
-    ]
+    _ = model  # prompt budget is fixed; model size used to add a second few-shot file
+    detected = structure.detect_mode(samples)
+    if detected == structure.REGEX_MODE:
+        return _regex_prompt(samples, vendor_hint, previous_attempt, previous_errors, unmapped_required)
+    return _structured_prompt(
+        samples, vendor_hint, detected, previous_attempt, previous_errors, unmapped_required
+    )
 
-    sample_block = "\n".join(f"  {i + 1}. {line}" for i, line in enumerate(samples))
-    vendor_line = f"The user says this vendor/product is: {vendor_hint}\n" if vendor_hint else ""
 
-    parts = [
-        "You are configuring a log parser for ULPF, an offline log pre-processing tool.",
-        "\n\n".join(example_blocks),
-        _schema_block(),
-        vendor_line + "Sample log lines from an unrecognized source:\n" + sample_block,
-        "Respond with only the JSON object described above.",
-    ]
+def apply_detected_mode(
+    config: Any,
+    samples: list[str],
+    vendor_hint: str | None = None,
+) -> Any:
+    """Force `rt_flow` / `mikrotik` when detection says so.
 
-    if previous_attempt is not None:
-        parts.append(
-            "Your previous attempt was:\n"
-            + json.dumps(previous_attempt, ensure_ascii=False)
-            + "\nIt failed validation: "
-            + (previous_errors or "unknown error")
-            + "\nFix it and respond with only the corrected JSON object."
-        )
+    The model may return only field_map, action_rules, a timestamp format,
+    and category. A `mode` of ``regex`` and any `line_regex` are discarded.
+    A missing category becomes ``network``. Other modes are left untouched
+    so a wrong guess (json on kv samples) still fails and retries.
+    """
+    if not isinstance(config, dict):
+        return config
+    detected = structure.detect_mode(samples)
+    if detected not in structure.FORCED_MODES:
+        return config
 
-    return "\n\n".join(parts)
+    cleaned = {key: value for key, value in config.items() if key != "line_regex"}
+    cleaned["mode"] = detected
+    category = cleaned.get("category")
+    if not isinstance(category, str) or not category.strip():
+        cleaned["category"] = "network"
+    if not isinstance(cleaned.get("vendor"), str):
+        cleaned["vendor"] = vendor_hint or ""
+    if not isinstance(cleaned.get("product"), str):
+        cleaned["product"] = ""
+    if not isinstance(cleaned.get("field_map"), dict):
+        cleaned["field_map"] = {}
+    if not isinstance(cleaned.get("action_rules"), list):
+        cleaned["action_rules"] = []
+
+    timestamp = cleaned.get("timestamp")
+    if isinstance(timestamp, str):
+        timestamp = {"keys": [], "format": timestamp}
+    elif isinstance(timestamp, dict):
+        timestamp = dict(timestamp)
+    else:
+        timestamp = {"keys": [], "format": ""}
+    if not isinstance(timestamp.get("format"), str):
+        timestamp["format"] = ""
+    keys = timestamp.get("keys")
+    if not isinstance(keys, list):
+        keys = []
+    if not keys and "timestamp" in structure.keys_for_mode(samples, detected):
+        keys = ["timestamp"]
+    timestamp["keys"] = keys
+    cleaned["timestamp"] = timestamp
+    return cleaned
 
 
 def _extract_json(text: str) -> str:
@@ -154,19 +224,23 @@ def generate_config(
     Always returns the *last* attempted config (even if it never passed
     validation) alongside its report, so a human can still inspect - and
     choose to approve - a close-but-imperfect result rather than getting
-    nothing back.
+    nothing back. On the way out, `format_hint` is set from detect.py so
+    the dynamic parser registers on the route the pipeline actually uses.
     """
     start = time.monotonic()
     model = getattr(client, "model", "unknown")
     previous_attempt: dict[str, Any] | None = None
     previous_errors: str | None = None
+    unmapped: list[str] = []
     raw_responses: list[str] = []
     last_report = validator.ValidationReport(ok=False, score=0.0, schema_errors=["no attempt made"])
     last_config: dict[str, Any] | None = None
     attempt = 0
 
     for attempt in range(max_retries + 1):
-        prompt = build_prompt(samples, vendor_hint, model, previous_attempt, previous_errors)
+        prompt = build_prompt(
+            samples, vendor_hint, model, previous_attempt, previous_errors, unmapped
+        )
         raw_text = client.generate(prompt)
         raw_responses.append(raw_text)
 
@@ -178,15 +252,21 @@ def generate_config(
             )
             previous_attempt = {"_raw_non_json_response": raw_text[:500]}
             previous_errors = last_report.error_summary()
+            unmapped = []
             continue
 
+        config = apply_detected_mode(config, samples, vendor_hint)
         report = validator.validate(config, samples, check_backtracking=check_backtracking)
         last_report = report
-        last_config = config
+        last_config = config if isinstance(config, dict) else None
         if report.ok:
             break
-        previous_attempt = config
+        previous_attempt = config if isinstance(config, dict) else {"_non_object": str(config)[:500]}
         previous_errors = report.error_summary()
+        unmapped = list(report.unmapped_required)
+
+    if isinstance(last_config, dict):
+        structure.attach_route(last_config, samples)
 
     return GenerationResult(
         config=last_config,

@@ -1,0 +1,18 @@
+vendor: Juniper
+product: SRX
+mode: rt_flow
+field_map:
+  network.src_ip: src_ip
+  network.dst_ip: dst_ip
+  network.src_port: src_port
+  network.dst_port: dst_port
+  event.action: event
+  observer.name: host
+action_rules: []
+timestamp:
+  keys:
+  - timestamp
+  format: Mmm dd HH:MM:SS
+category: network
+format_hint: syslog
+generator: ulpf.llm

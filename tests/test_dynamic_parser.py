@@ -193,3 +193,200 @@ def test_hand_written_mappings_are_never_picked_up_as_dynamic() -> None:
     assert "fortigate.yaml" not in names
     assert "cisco_asa.yaml" not in names
     assert "checkpoint.yaml" not in names
+
+
+def test_quoted_kv_mapping_turns_partial_line_into_ok(
+    tmp_path: Path, isolated_registry: None
+) -> None:
+    """Sophos-style quoted values, including a value that contains a space.
+
+    Before the mapping exists the generic fallback owns the line. After a
+    mode=kv config is saved, the same line is ok and the quoted text is
+    intact — the model never supplied a regex.
+    """
+    line = (
+        'device_name="ZZSophos9827" timestamp="2026-10-04 12:00:00" '
+        'src_ip="10.55.55.55" dst_ip="10.66.66.66" src_port="4431" dst_port="443" '
+        'protocol="tcp" status="allow" msg="hello world"'
+    )
+    samples_dir = _write_samples_dir(tmp_path, [line])
+    before = _load_events_from(tmp_path, samples_dir, "out_before")
+    assert before[0]["parse.status"] == "partial"
+    assert before[0]["parse.parser"] == "generic"
+
+    config = {
+        "vendor": "ZZSophos9827",
+        "product": "ZZXG",
+        "mode": "kv",
+        "format_hint": "kv",
+        "field_map": {
+            "network.src_ip": "src_ip",
+            "network.dst_ip": "dst_ip",
+            "network.src_port": "src_port",
+            "network.dst_port": "dst_port",
+            "network.transport": "protocol",
+            "event.action": "status",
+            "event.description": "msg",
+        },
+        "action_rules": [{"match_value": "allow", "action": "allow"}],
+        "timestamp": {"keys": ["timestamp"], "format": "YYYY-MM-DD HH:MM:SS"},
+        "category": "network",
+        "generator": "ulpf.llm",
+    }
+    path = MAPPINGS_DIR / "zzsophos9827.yaml"
+    assert not path.exists()
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    try:
+        after = _load_events_from(tmp_path, samples_dir, "out_after")
+    finally:
+        path.unlink(missing_ok=True)
+
+    assert len(after) == 1
+    event = after[0]
+    assert event["parse.status"] == "ok"
+    assert event["parse.parser"] == "llm:ZZSophos9827"
+    assert event["parse.format"] == "kv"
+    assert event["observer.vendor"] == "ZZSophos9827"
+    assert event["network.src_ip"] == "10.55.55.55"
+    assert event["network.dst_ip"] == "10.66.66.66"
+    assert event["network.src_port"] == 4431
+    assert event["network.dst_port"] == 443
+    assert event["network.transport"] == "tcp"
+    assert event["event.action"] == "allow"
+    assert event["event.outcome"] == "success"
+    assert event["event.description"] == "hello world"
+    assert event["timestamp"] == "2026-10-04 12:00:00"
+    assert event["provenance.raw_text"] == line
+
+
+def test_syslog_kv_mapping_turns_partial_line_into_ok(
+    tmp_path: Path, isolated_registry: None
+) -> None:
+    """Juniper RT_FLOW: syslog prefix plus hyphenated quoted key=value pairs."""
+    line = (
+        "<14>Oct  4 12:00:01 zzsrx1 RT_FLOW: RT_FLOW_SESSION_DENY: "
+        'source-address="10.55.55.55" source-port="12345" '
+        'destination-address="10.66.66.66" destination-port="443" '
+        'protocol="tcp" action="deny"'
+    )
+    samples_dir = _write_samples_dir(tmp_path, [line])
+    before = _load_events_from(tmp_path, samples_dir, "out_before")
+    assert before[0]["parse.status"] == "partial"
+    assert before[0]["parse.parser"] == "generic"
+
+    config = {
+        "vendor": "ZZJuniper9827",
+        "product": "ZZSRX",
+        "mode": "syslog_kv",
+        "format_hint": "syslog",
+        "field_map": {
+            "network.src_ip": "source-address",
+            "network.dst_ip": "destination-address",
+            "network.src_port": "source-port",
+            "network.dst_port": "destination-port",
+            "network.transport": "protocol",
+            "event.action": "action",
+        },
+        "action_rules": [{"match_value": "deny", "action": "deny"}],
+        "timestamp": {"keys": ["syslog_timestamp"], "format": "Mmm dd HH:MM:SS"},
+        "category": "network",
+        "generator": "ulpf.llm",
+    }
+    path = MAPPINGS_DIR / "zzjuniper9827.yaml"
+    assert not path.exists()
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    try:
+        after = _load_events_from(tmp_path, samples_dir, "out_after")
+    finally:
+        path.unlink(missing_ok=True)
+
+    assert len(after) == 1
+    event = after[0]
+    assert event["parse.status"] == "ok"
+    assert event["parse.parser"] == "llm:ZZJuniper9827"
+    assert event["parse.format"] == "syslog"
+    assert event["observer.vendor"] == "ZZJuniper9827"
+    assert event["network.src_ip"] == "10.55.55.55"
+    assert event["network.dst_ip"] == "10.66.66.66"
+    assert event["network.src_port"] == 12345
+    assert event["network.dst_port"] == 443
+    assert event["network.transport"] == "tcp"
+    assert event["event.action"] == "deny"
+    assert event["event.outcome"] == "failure"
+    assert event["timestamp"] == "Oct  4 12:00:01"
+    assert event["provenance.raw_text"] == line
+
+
+def test_rt_flow_mapping_turns_partial_lines_into_ok(
+    tmp_path: Path, isolated_registry: None
+) -> None:
+    """Positional RT_FLOW: protocol numbers and session verbs are rewritten."""
+    create = (
+        "<14>Sep  3 09:01:02 ZZEDGE9827 RT_FLOW: RT_FLOW_SESSION_CREATE: "
+        "session created 10.55.55.55/49811->10.66.66.66/443 0x0 junos-https "
+        "10.55.55.55/49811->10.66.66.66/443 0x0 N/A N/A 6 zz-policy zzone uzone 42"
+    )
+    deny = (
+        "<14>Sep 30 09:01:03 ZZEDGE9827 RT_FLOW: RT_FLOW_SESSION_DENY: "
+        "session denied 10.55.55.56/1200->10.66.66.67/53 junos-dns-udp 17(0) "
+        "untrust-to-trust untrust trust NO_POLICY 17"
+    )
+    icmp = (
+        "<14>Sep 30 09:01:04 ZZEDGE9827 RT_FLOW: RT_FLOW_SESSION_CREATE: "
+        "session created 10.55.55.55/0->10.66.66.66/0 0x0 junos-icmp-ping "
+        "10.55.55.55/0->10.66.66.66/0 0x0 N/A N/A 1 zz-policy zzone uzone 43"
+    )
+    samples_dir = _write_samples_dir(tmp_path, [create, deny, icmp])
+    before = _load_events_from(tmp_path, samples_dir, "out_before")
+    assert [row["parse.status"] for row in before] == ["partial", "partial", "partial"]
+    assert before[0]["parse.parser"] == "generic"
+
+    config = {
+        "vendor": "ZZRtFlow9827",
+        "product": "ZZSRX",
+        "mode": "rt_flow",
+        "format_hint": "syslog",
+        "field_map": {
+            "network.src_ip": "src_ip",
+            "network.dst_ip": "dst_ip",
+            "network.src_port": "src_port",
+            "network.dst_port": "dst_port",
+            "observer.name": "host",
+        },
+        "action_rules": [],
+        "timestamp": {"keys": ["timestamp"], "format": "Mmm dd HH:MM:SS"},
+        "category": "network",
+        "generator": "ulpf.llm",
+    }
+    path = MAPPINGS_DIR / "zzrtflow9827.yaml"
+    assert not path.exists()
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    try:
+        after = _load_events_from(tmp_path, samples_dir, "out_after")
+    finally:
+        path.unlink(missing_ok=True)
+
+    assert len(after) == 3
+    created, denied, ping = after
+    assert created["parse.status"] == "ok"
+    assert created["parse.parser"] == "llm:ZZRtFlow9827"
+    assert created["parse.format"] == "syslog"
+    assert created["network.src_ip"] == "10.55.55.55"
+    assert created["network.dst_port"] == 443
+    assert created["network.transport"] == "tcp"
+    assert created["event.action"] == "allow"
+    assert created["event.outcome"] == "success"
+    assert created["timestamp"] == "Sep  3 09:01:02"
+    assert created["provenance.raw_text"] == create
+    assert denied["network.transport"] == "udp"
+    assert denied["event.action"] == "deny"
+    assert denied["event.outcome"] == "failure"
+    assert ping["network.transport"] == "icmp"
+    assert ping["network.src_port"] == 0
+    assert ping["event.action"] == "allow"
+
+
+def _load_events_from(tmp_path: Path, samples_dir: Path, name: str) -> list[dict]:
+    out_dir = tmp_path / name
+    run(samples_dir, out_dir)
+    return _load_events(out_dir)

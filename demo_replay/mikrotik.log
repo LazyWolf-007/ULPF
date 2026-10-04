@@ -1,0 +1,3 @@
+sep/03 09:01:02 firewall,info forward: in:ether1 out:ether2, src-mac 02:00:00:00:00:01, proto TCP (SYN), 10.7.7.7:1234->10.8.8.8:443, len 60
+sep/03 09:02:02 firewall,info drop forward: in:ether2 out:(unknown 0), src-mac 02:00:00:00:00:02, proto ICMP (type 8, code 0), 10.7.7.7->10.8.8.8, len 84
+<30>Sep  3 09:03:02 edge-test firewall,info input: in:ether1 out:ether2, src-mac 02:00:00:00:00:03, proto UDP, 10.7.7.7:5300->10.8.8.8:53, len 72

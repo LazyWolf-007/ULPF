@@ -322,18 +322,20 @@ ULPF's air-gap rule.
 
 ## Offline LLM parser generator (`ulpf/llm/`, `ulpf/parsers/dynamic.py`)
 
-Four files under `ulpf/llm/`, one under `ulpf/parsers/`:
+Five files under `ulpf/llm/`, one under `ulpf/parsers/`:
 
+- `structure.py` - deterministic detection and tokenization (quoted key=value, JSON, CEF/LEEF, syslog prefix split from the body). The model never writes this extractor.
 - `client.py` - transport only (Ollama native or OpenAI-compatible), loopback-enforced, urllib-only.
-- `generator.py` - builds the few-shot prompt, runs the generate -> validate -> retry loop.
-- `validator.py` - the five checks (schema, regex safety, match rate, required-field coverage, report).
+- `generator.py` - builds the short prompt, runs the generate -> validate -> retry loop.
+- `validator.py` - schema, regex safety (regex mode only), match rate, required-field coverage, report.
 - `generate.py` - the CLI (`python -m ulpf.llm.generate`): read samples, generate, show, approve, save.
-- `ulpf/parsers/dynamic.py` - loads approved configs from `ulpf/mappings/*.yaml` at registration time.
+- `ulpf/parsers/dynamic.py` - loads approved configs from `ulpf/mappings/*.yaml` at registration time and tokenizes with `structure.py`.
 
-None of this executes model-authored code. `line_regex` only ever reaches
-`re.compile(...).match(...)` - in the validator (checking it), in
-`dynamic.py` (running it at parse time), and nowhere else. There is no
-`eval`/`exec` in any of these files.
+None of this executes model-authored code. Structured modes have no regex
+at all. Regex mode (unstructured text only) compiles `line_regex` with
+`re.compile` and uses it only for `.match()` / `.groupdict()` - in the
+validator and in `dynamic.py`, nowhere else - and rejects more than 6
+capture groups. There is no `eval`/`exec` in any of these files.
 
 ### Client (`ulpf/llm/client.py`)
 
@@ -356,33 +358,45 @@ never actually take effect since the flag always looked "explicitly set";
 fixed by defaulting `--model` to `None` and resolving the three-way
 precedence by hand after parsing).
 
+### Structure (`ulpf/llm/structure.py`)
+
+`tokenize(line)` splits an optional syslog prefix first (RFC 5424, RFC 3164
+with or without `<PRI>`, or a bare `<PRI>`), then classifies the body:
+
+- a JSON object, flattened one level (`event.action` for a nested key);
+- a CEF or LEEF header plus its extension (header fields are `cef_*` /
+  `leef_*`; extension pairs are ordinary keys; both are mode `cef`);
+- key=value, where a value may be double-quoted and may contain spaces and
+  backslash escapes (`\"`, `\\`, `\n`, `\t`, `\r`).
+
+Mode is `syslog_kv` when a syslog header is followed by at least one
+key=value pair, `kv` when there is no header and at least two pairs (one
+stray `token=value` in a sentence is not a kv log), and `regex` otherwise.
+`example_values` keeps at most two distinct values per key. `route_for`
+is the `detect.py` format (a `<PRI>` line routes as `syslog` even when the
+body's mode is `cef`). `attach_route` stamps that onto `format_hint`; the
+model does not choose it.
+
 ### Prompt (`ulpf/llm/generator.py`, `build_prompt`)
 
-One real, hand-written mapping (`fortigate.yaml`, read from disk so it can
-never drift from the actual file) is included as few-shot *style* context;
-a second (`cisco_asa.yaml`) is added only when the model name contains a
-size tag of `7b` or larger (item 12: keep the prompt under ~1500 tokens,
-one example unless the model is 7b+). The target *schema* is given
-separately and is deliberately different from - and more constrained than
-- the example mappings' own shape (see "Config schema" below).
+For a structured mode the prompt lists source keys and up to two example
+values. It does not include the raw lines, a few-shot YAML mapping, or a
+request for a regex. It asks for `field_map` (internal field -> source
+key) plus the short shell of vendor, product, mode, action rules,
+timestamp, and category. The first prompt stays under ~800 tokens
+(`PROMPT_TOKEN_BUDGET`, counted as 4 characters per token). Model size
+does not change the prompt: the old second few-shot file (`cisco_asa.yaml`
+for 7b+) is gone, because those hand-written `fields:` sections map
+raw-key -> internal-field, the opposite direction from `field_map`, and a
+3b model copied that direction.
 
-**A real-model run during development surfaced a genuine prompt weakness**,
-kept here because it's a concrete, verified finding, not speculation: a 3b
-model reversed `field_map`'s key/value direction, writing
-`{"srcip": "network.src_ip"}` instead of `{"network.src_ip": "src_ip"}`.
-The likely cause: `fortigate.yaml`'s own `fields:` section maps
-`raw-log-key -> internal-field` (e.g. `srcip: network.src_ip`) - the
-*opposite* direction from what `field_map` wants - and the model appears to
-have anchored on that example's left-hand key names. The prompt now says so
-explicitly ("this is the OPPOSITE direction from the example mapping's
-`fields:` section above - do not reuse its left-hand key names"). This fix
-was verified only against the existing mocked-client test suite, not
-against another real model call (real-model calls are reserved for manual
-testing outside this build, per the task that added this feature).
+Regex mode is only when `detect_mode` is `regex`. That prompt shows the
+lines (there are no keys) and asks for `line_regex` with at most 6 named
+groups.
 
 Retries (default up to 2, so 3 attempts total) feed the previous attempt's
-JSON and `ValidationReport.error_summary()` back into the next prompt,
-asking the model to fix exactly that.
+JSON, `ValidationReport.error_summary()`, and an explicit
+`Unmapped required fields:` line back into the next prompt.
 
 ### Config schema (`ulpf/llm/validator.py`)
 
@@ -390,69 +404,69 @@ asking the model to fix exactly that.
 {
   "vendor": "string",
   "product": "string",
-  "format_hint": "json | cef | leef | kv | syslog | unknown",
-  "line_regex": "a Python re pattern with named groups, applied with re.match",
-  "field_map": {"<internal field>": "<regex group name>"},
-  "action_rules": [{"match": "<raw captured action value>", "action": "<canonical action>"}],
-  "timestamp_format": "free-text description",
+  "mode": "kv | json | cef | syslog_kv | regex",
+  "field_map": {"<internal field>": "<source key, or regex group name in regex mode>"},
+  "action_rules": [{"match_value": "<raw captured action>", "action": "<canonical action>"}],
+  "timestamp": {"keys": ["<source key>", "..."], "format": "free-text description"},
   "category": "network | authentication"
 }
 ```
 
-`field_map` keys are restricted to a fixed allow-list
-(`validator.ALLOWED_FIELD_MAP_TARGETS`) - a subset of `schema.EVENT_KEYS`
-that excludes identity/provenance/parse-status fields the pipeline owns,
-not the config (`event_id`, `parse.*`, `provenance.*`, `unmapped`). An
-unknown key is a schema error, not a silently-ignored no-op - this is what
-turns a hallucinated field name into concrete, actionable retry feedback
-("field_map key 'srcip' is not a valid target field; use one of [...]")
-instead of a config that silently drops data at runtime.
+`kv` / `json` / `cef` / `syslog_kv` must not contain `line_regex`. Regex
+mode is the only one that does, and only when the samples themselves are
+unstructured; pointing regex mode at structured samples is a schema error
+and the pattern is not compiled. `line_regex` may have at most 6 capture
+groups (`structure.MAX_CAPTURE_GROUPS`).
+
+`field_map` keys are restricted to `validator.ALLOWED_FIELD_MAP_TARGETS`,
+a subset of `schema.EVENT_KEYS` that excludes identity/provenance/parse
+fields the pipeline owns. An unknown internal field is a schema error.
+An unknown *source* key (or, in regex mode, a group name that is not in
+the pattern) is also a schema error and names the keys that do exist, so
+the retry can fix a hallucinated key instead of dropping data. `format_hint`
+is not model output; `structure.attach_route` sets it to the detect.py
+format before the config is saved.
 
 ### Validation (`ulpf/llm/validator.validate`)
 
-1. **Schema.** Required keys present with the right types; `format_hint` in
-   the allowed set; every `field_map` key in the allow-list above; every
-   `action_rules` entry has `match`/`action`; every string value anywhere
-   in the config (recursively) is scanned for code-like markers (`"import
-   "`, `"def "`, `"eval("`, `"__import__"`, ...) and rejected if found -
-   defense in depth for "never Python code", on top of the config never
-   being `eval`'d regardless.
-2. **Regex safety.** `re.compile` must succeed, then a catastrophic-
-   backtracking guard runs the pattern against 2 short adversarial strings
-   (`"a"*30 + "!"`, `"0"*30 + "x"`) with a 1-second-per-string timeout.
-   **This guard uses a subprocess, not a thread, and that's not
-   incidental** - verified directly during development: CPython's `re`
-   engine does not release the GIL during a match, so a thread-based
-   `concurrent.futures.ThreadPoolExecutor` timeout left the *entire
-   interpreter* unresponsive for 30+ seconds on `^(a+)+$` against the exact
-   stress string used here (the timeout call itself couldn't get scheduled
-   to fire). A `multiprocessing` child process can be `.terminate()`d
-   regardless of what it's stuck doing internally, so that's what's used -
-   confirmed working (correctly flags the catastrophic pattern in ~1s,
-   passes a safe pattern in ~0.1s) before being wired into the real
-   validator. If even spawning the probe process fails (`OSError`), the
-   regex is conservatively treated as unsafe rather than assumed fine.
-3. **Match rate.** The regex (via `.match`, matching exactly how
-   `dynamic.py` uses it at runtime - same semantics in both places on
-   purpose) must match >= 80% of the sample lines.
-4. **Required-field coverage.** For each sample line, independent oracle
-   regexes (the *same* ones `ulpf/parsers/generic.py` uses for its own
-   heuristic fallback - `IPV4_RE`/`IPV6_RE`/`ISO_TS_RE`/`SYSLOG_TS_RE`/
-   `ACTION_RE`, imported directly rather than re-implemented) decide
-   whether that line plainly contains a src/dst IP, a timestamp, or an
-   action word; `required_field_rate` is the fraction of those that the
-   config's own regex+field_map actually captured.
+1. **Schema.** Required keys present with the right types; `mode` in the
+   allowed set; no `line_regex` on a structured mode; every `field_map`
+   key in the allow-list above; every `action_rules` entry has
+   `match_value`/`action`; `timestamp.keys` is a list of strings and
+   `timestamp.format` is a string; every string value anywhere in the
+   config (recursively) is scanned for code-like markers (`"import "`,
+   `"def "`, `"eval("`, `"__import__"`, ...) and rejected if found.
+2. **Regex safety (regex mode only).** `re.compile` must succeed, the
+   pattern must have <= 6 capture groups, then a catastrophic-backtracking
+   guard runs it against 2 short adversarial strings (`"a"*30 + "!"`,
+   `"0"*30 + "x"`) with a 1-second-per-string timeout. **This guard uses
+   a subprocess, not a thread, and that's not incidental** - verified
+   directly during development: CPython's `re` engine does not release
+   the GIL during a match, so a thread-based timeout left the *entire
+   interpreter* unresponsive for 30+ seconds on `^(a+)+$` against the
+   exact stress string used here. A `multiprocessing` child can be
+   `.terminate()`d regardless. If spawning the probe fails (`OSError`),
+   the regex is treated as unsafe. Structured modes never compile a
+   model regex, including one smuggled in next to `mode: kv`.
+3. **Match rate.** A line is mapped when `structure.tokenize` returns the
+   config's mode and a non-empty field dict (regex mode: `.match`
+   succeeds). At least 80% of the sample lines must map. Same tokenizer
+   `dynamic.py` uses at runtime.
+4. **Required-field coverage.** For each *mapped* line, the same oracle
+   regexes `ulpf/parsers/generic.py` uses (`IPV4_RE` / `IPV6_RE` /
+   `ISO_TS_RE` / `SYSLOG_TS_RE` / `ACTION_RE`) decide whether that line
+   plainly contains a src/dst IP, a timestamp, or an action word.
+   `required_field_rate` is the fraction of those that `field_map` plus
+   `timestamp.keys` actually captured. Below 80%, `unmapped_required`
+   lists the internal field names and the retry prompt repeats them.
 5. **Report.** `ValidationReport(ok, score, schema_errors, regex_error,
-   catastrophic_backtracking, match_rate, required_field_rate, per_line)`.
-   `ok` requires match_rate >= 0.8 (schema/regex/backtracking failures
-   short-circuit to `ok=False` immediately, before match rate is even
-   computed). `score = 0.6 * match_rate + 0.4 * required_field_rate`.
-   `check_backtracking=False` skips step 2 - used by `generator.py`'s
-   retry-loop tests, which are exercising retry behavior, not regex
-   safety, to keep the (otherwise subprocess-spawning) test suite fast;
-   the CLI and the dedicated validator tests always leave it on.
-   `validate_schema_only(config)` runs steps 1-2 with no sample lines, for
-   `--replay` without `--samples`.
+   catastrophic_backtracking, match_rate, required_field_rate,
+   unmapped_required, per_line)`. `ok` requires match_rate >= 0.8 and
+   required_field_rate >= 0.8, and no schema/regex/backtracking errors.
+   `score = 0.6 * match_rate + 0.4 * required_field_rate`.
+   `check_backtracking=False` skips the ReDoS guard - used by the
+   generator-loop tests. `validate_schema_only(config)` runs steps 1-2
+   with no sample lines, for `--replay` without `--samples`.
 
 ### Dynamic parser loading (`ulpf/parsers/dynamic.py`)
 
@@ -461,7 +475,15 @@ vendor. `register(registry)` scans `ulpf/mappings/*.yaml` for configs
 carrying `generator: "ulpf.llm"` (written by `generate.py` on approval;
 absent from every hand-written mapping, so `dynamic._load_dynamic_configs`
 never picks those up) and builds one closure per vendor via `_make_parser`,
-registered under that vendor's own `format_hint`.
+registered under that vendor's `format_hint` (the detect.py route).
+
+Structured modes call `structure.tokenize` and apply `field_map`. The
+closure returns `None` unless the line's mode matches and at least one
+mapped source key is present, so a kv config does not claim every kv line.
+Timestamp keys are joined in listed order when `field_map` did not already
+set `timestamp`. A config that still has `line_regex` and no `mode` (the
+previous generator's shape) still loads, without the 6-group cap; new
+regex-mode configs are capped.
 
 **Existing parsers keep priority.** `ulpf/parsers/__init__.py`'s module
 discovery sorts `dynamic` to load *last*, regardless of alphabetical
@@ -600,11 +622,10 @@ echo 'src=10.9.9.1 dst=10.9.9.2 act=deny' > /tmp/samples.txt
 echo 'src=10.9.9.3 dst=10.9.9.4 act=allow' >> /tmp/samples.txt
 echo 'src=10.9.9.5 dst=10.9.9.6 act=deny' >> /tmp/samples.txt
 cat > /tmp/config.json <<'EOF'
-{"vendor": "DemoVendor", "product": "DemoBox", "format_hint": "kv",
- "line_regex": "^src=(?P<src_ip>\\S+) dst=(?P<dst_ip>\\S+) act=(?P<action>\\S+)$",
- "field_map": {"network.src_ip": "src_ip", "network.dst_ip": "dst_ip", "event.action": "action"},
- "action_rules": [{"match": "deny", "action": "deny"}],
- "timestamp_format": "none", "category": "network"}
+{"vendor": "DemoVendor", "product": "DemoBox", "mode": "kv",
+ "field_map": {"network.src_ip": "src", "network.dst_ip": "dst", "event.action": "act"},
+ "action_rules": [{"match_value": "deny", "action": "deny"}],
+ "timestamp": {"keys": [], "format": ""}, "category": "network"}
 EOF
 python -m ulpf.llm.generate --replay /tmp/config.json --samples /tmp/samples.txt --auto-approve
 python -m ulpf.pipeline samples out   # (with a matching line dropped into samples/)

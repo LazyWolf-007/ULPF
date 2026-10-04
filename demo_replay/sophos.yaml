@@ -1,0 +1,28 @@
+vendor: Sophos
+product: ULPF
+mode: kv
+field_map:
+  event.action: log_type
+  event.description: log_subtype
+  event.severity: priority
+  network.dst_ip: dst_ip
+  network.dst_port: dst_port
+  network.src_ip: src_ip
+  network.src_port: src_port
+  network.transport: protocol
+  observer.name: device_name
+  timestamp: date
+  user.name: user_name
+action_rules:
+- match_value: Allow
+  action: allow
+- match_value: Deny
+  action: deny
+timestamp:
+  keys:
+  - date
+  - time
+  format: YYYY-MM-DD HH:MM:SS
+category: network
+format_hint: kv
+generator: ulpf.llm

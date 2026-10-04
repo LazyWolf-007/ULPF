@@ -1,0 +1,3 @@
+device_name="SFW" date="2026-10-04" time="12:00:00" log_type="Deny" log_subtype="Denied" priority="Warning" user_name="alice" src_ip="10.1.1.1" dst_ip="10.2.2.2" src_port="40000" dst_port="443" protocol="TCP"
+device_name="SFW" date="2026-10-04" time="12:00:01" log_type="Allow" log_subtype="Allowed" priority="Information" user_name="bob" src_ip="10.1.1.8" dst_ip="10.2.2.9" src_port="40001" dst_port="53" protocol="UDP"
+device_name="SFW" date="2026-10-04" time="12:00:02" log_type="Deny" log_subtype="Denied" priority="Warning" user_name="carol" src_ip="10.9.9.9" dst_ip="10.8.8.8" src_port="40002" dst_port="22" protocol="TCP"

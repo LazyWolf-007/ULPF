@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from ulpf.llm import client as client_mod
-from ulpf.llm import generator, validator
+from ulpf.llm import generator, structure, validator
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent  # .../ulpf
 MAPPINGS_DIR = PACKAGE_DIR / "mappings"
@@ -39,6 +39,19 @@ def _slugify(vendor: str) -> str:
 def _read_samples(path: str | Path) -> list[str]:
     lines = [line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()]
     return [line for line in lines if line]
+
+
+def _load_replay_config(path: str | Path) -> Any:
+    """Load a config saved by `_save_mapping` (YAML) or the JSON replay form.
+
+    `--replay` does not call a model. YAML is what approval writes; JSON is
+    the form the manual examples use. Both are data, never code.
+    """
+    file = Path(path)
+    text = file.read_text(encoding="utf-8")
+    if file.suffix.lower() in {".yaml", ".yml"}:
+        return yaml.safe_load(text)
+    return json.loads(text)
 
 
 def _print_config_and_report(config: dict[str, Any] | None, report: validator.ValidationReport) -> None:
@@ -118,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--replay",
         default=None,
-        help="load a previously saved JSON config instead of calling the model (demo-safe fallback)",
+        help="load a previously saved JSON or YAML config instead of calling the model (demo-safe fallback)",
     )
     args = parser.parse_args(argv)
 
@@ -126,8 +139,11 @@ def main(argv: list[str] | None = None) -> None:
 
     start = time.monotonic()
     if args.replay:
-        config = json.loads(Path(args.replay).read_text(encoding="utf-8"))
+        config = _load_replay_config(args.replay)
         samples = _read_samples(args.samples) if args.samples else []
+        if isinstance(config, dict):
+            # format_hint is the detect.py route, not a model output.
+            structure.attach_route(config, samples)
         if samples:
             report = validator.validate(config, samples)
         else:
