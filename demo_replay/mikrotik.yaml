@@ -2,17 +2,20 @@ vendor: MikroTik
 product: RouterOS
 mode: mikrotik
 field_map:
-  network.src_ip: src_ip
-  network.dst_ip: dst_ip
-  network.src_port: src_port
-  network.dst_port: dst_port
   event.action: action
+  event.severity: severity
+  network.dst_ip: dst_ip
+  network.dst_port: dst_port
+  network.src_ip: src_ip
+  network.src_port: src_port
+  network.transport: protocol
   observer.name: host
+  timestamp: timestamp
 action_rules: []
 timestamp:
   keys:
   - timestamp
   format: Mmm dd HH:MM:SS
 category: network
-format_hint: unknown
+format_hint: routeros
 generator: ulpf.llm

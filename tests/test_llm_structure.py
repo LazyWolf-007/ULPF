@@ -149,6 +149,7 @@ _RT_CANONICAL = {
     "timestamp",
     "event",
     "protocol",
+    "pri",
 }
 
 
@@ -169,6 +170,7 @@ def test_positional_rt_flow_create_keeps_padded_day() -> None:
     assert tokenized.fields["dst_ip"] == "10.8.8.8"
     assert tokenized.fields["dst_port"] == "80"
     assert tokenized.fields["protocol"] == "6"
+    assert tokenized.fields["pri"] == "14"
     assert structure.detect_mode([line]) == "rt_flow"
     assert structure.route_for([line]) == "syslog"
 
@@ -221,6 +223,7 @@ def test_sd_twin_stays_syslog_kv_and_projects_onto_rt_flow_keys() -> None:
     assert projected["protocol"] == "17"
     assert projected["event"] == "RT_FLOW_SESSION_CREATE"
     assert projected["timestamp"] == "2026-10-04T12:00:01Z"
+    assert projected["pri"] == "14"
 
 
 def test_mikrotik_firewall_sentence_is_its_own_mode() -> None:
@@ -239,18 +242,30 @@ def test_mikrotik_firewall_sentence_is_its_own_mode() -> None:
     forwarded = structure.tokenize(forward)
     dropped = structure.tokenize(icmp)
     hosted = structure.tokenize(pri)
+    syslog_time = (
+        "Sep  3 09:03:02 edge-test firewall,info input: in:ether1 out:ether2, "
+        "src-mac 02:00:00:00:00:03, proto UDP, 10.7.7.7:5300->10.8.8.8:53, len 72"
+    )
     assert forwarded.mode == dropped.mode == hosted.mode == "mikrotik"
     assert structure.detect_mode([forward, icmp, pri]) == "mikrotik"
-    assert forwarded.fields["action"] == "forward"
+    assert "action" not in forwarded.fields
+    assert forwarded.fields["chain"] == "forward"
     assert forwarded.fields["src_port"] == "1234"
     assert forwarded.fields["protocol"] == "TCP"
     assert forwarded.fields["in_if"] == "ether1"
-    assert dropped.fields["action"] == "drop forward"
+    assert dropped.fields["action"] == "drop"
+    assert dropped.fields["chain"] == "forward"
     assert dropped.fields["out_if"] == "(unknown 0)"
     assert "src_port" not in dropped.fields
     assert dropped.fields["protocol"] == "ICMP"
     assert hosted.fields["host"] == "edge-test"
     assert hosted.fields["timestamp"] == "Sep  3 09:03:02"
     assert hosted.fields["protocol"] == "UDP"
-    assert structure.route_for([forward]) == "unknown"
+    assert hosted.fields["pri"] == "30"
+    assert "action" not in hosted.fields
+    assert hosted.fields["chain"] == "input"
+    assert structure.tokenize(syslog_time).mode == "mikrotik"
+    assert structure.route_for([forward]) == "routeros"
     assert structure.route_for([pri]) == "syslog"
+    assert structure.route_for([syslog_time]) == "routeros"
+    assert structure.route_for([forward, icmp, pri]) == "routeros"

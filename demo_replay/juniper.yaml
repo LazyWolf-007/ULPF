@@ -2,12 +2,15 @@ vendor: Juniper
 product: SRX
 mode: rt_flow
 field_map:
-  network.src_ip: src_ip
-  network.dst_ip: dst_ip
-  network.src_port: src_port
-  network.dst_port: dst_port
   event.action: event
+  event.severity: pri
+  network.dst_ip: dst_ip
+  network.dst_port: dst_port
+  network.src_ip: src_ip
+  network.src_port: src_port
+  network.transport: protocol
   observer.name: host
+  timestamp: timestamp
 action_rules: []
 timestamp:
   keys:

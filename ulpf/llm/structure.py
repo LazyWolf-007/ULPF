@@ -82,7 +82,7 @@ _MODE_ROUTE = {
     "cef": "cef",
     "syslog_kv": "syslog",
     "rt_flow": "syslog",
-    "mikrotik": "unknown",
+    "mikrotik": "routeros",
     "regex": "unknown",
 }
 
@@ -149,6 +149,10 @@ _MIKROTIK_FIELDS = (
     "nat",
     "length",
 )
+# The pre-colon blob is "<verb> <chain>" or just the chain. "forward" and
+# "input" are chain names. Only drop/accept are the verdict.
+_MT_VERBS = {"drop": "drop", "accept": "accept"}
+_MT_CHAINS = frozenset({"forward", "input"})
 
 _EXAMPLE_VALUE_LIMIT = 40
 
@@ -243,18 +247,38 @@ def keys_for_mode(lines: list[str], mode: str) -> list[str]:
     return list(seen)
 
 
+def _route_line(line: str) -> str:
+    """Format hint for one line.
+
+    A RouterOS sentence with no ``<pri>`` is ``routeros``. detect.py calls
+    that shape ``unknown``, which is not its format. A line that starts
+    with ``<pri>`` stays ``syslog``. Other modes are unchanged, including
+    a no-PRI key=value line, which stays ``kv``.
+    """
+    detected = detect_format(line)
+    if detected != "unknown":
+        return detected
+    tokenized = tokenize(line)
+    if tokenized.mode == "mikrotik":
+        return "routeros"
+    return detected
+
+
 def route_for(lines: list[str]) -> str:
-    """detect.py format the pipeline will dispatch these lines to.
+    """Format the pipeline should stamp on a config for these lines.
 
     This can differ from `detect_mode`: a `<PRI>` line is routed as
     ``syslog`` even when the body tokenizes as ``cef`` or ``json``.
+    A RouterOS line without ``<PRI>`` is ``routeros``. One config still
+    gets the majority format, so a file of ``sep/03`` lines plus one
+    ``<PRI>`` line is ``routeros``.
     """
     counts: dict[str, int] = {}
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
-        route = detect_format(stripped)
+        route = _route_line(stripped)
         counts[route] = counts.get(route, 0) + 1
     if not counts:
         return "unknown"
@@ -361,7 +385,7 @@ def rt_flow_fields(line: str) -> dict[str, str] | None:
 
     The SD twin keeps ``tokenize().mode == "syslog_kv"`` so a key=value
     config still sees ``source-address``. This projection only renames the
-    same endpoints, host, timestamp, event, and protocol number.
+    same endpoints, host, timestamp, event, protocol number, and pri.
     """
     tokenized = tokenize(line)
     if tokenized.mode == "rt_flow":
@@ -382,6 +406,7 @@ def rt_flow_fields(line: str) -> dict[str, str] | None:
     _copy_if(projected, "protocol", fields.get("protocol-id") or fields.get("protocol"))
     _copy_if(projected, "host", fields.get("syslog_host"))
     _copy_if(projected, "timestamp", fields.get("syslog_timestamp"))
+    _copy_if(projected, "pri", fields.get("syslog_pri"))
     return projected
 
 
@@ -396,7 +421,8 @@ def _parse_rt_flow(header: dict[str, str] | None, body: str) -> dict[str, str] |
     CREATE, DENY, and CLOSE put the service, policy, and zones in different
     columns, and a structured-data line does not use columns at all. The
     fields below are the ones every positional line can fill: endpoints,
-    host, timestamp, event name, and the protocol number.
+    host, timestamp, event name, the protocol number, and pri when the
+    line starts with ``<PRI>``.
     """
     match = _RT_EVENT_RE.search(body)
     if match is None:
@@ -416,11 +442,32 @@ def _parse_rt_flow(header: dict[str, str] | None, body: str) -> dict[str, str] |
     if header:
         host = header.get("syslog_host")
         timestamp = header.get("syslog_timestamp")
+        pri = header.get("syslog_pri")
         if host:
             fields["host"] = host
         if timestamp:
             fields["timestamp"] = timestamp
+        if pri:
+            fields["pri"] = pri
     return fields
+
+
+def _split_mikrotik_action(blob: str) -> tuple[str, str]:
+    """Split ``drop forward`` into a verdict and a chain.
+
+    ``forward`` and ``input`` are chain names. They are not the action.
+    ``drop`` and ``accept`` are the verdict. Anything else is left out of
+    both so it cannot be stored as an allow.
+    """
+    verb = ""
+    chain = ""
+    for word in blob.split():
+        lowered = word.lower()
+        if lowered in _MT_VERBS and not verb:
+            verb = _MT_VERBS[lowered]
+        elif lowered in _MT_CHAINS and not chain:
+            chain = lowered
+    return verb, chain
 
 
 def _parse_mikrotik(text: str) -> dict[str, str] | None:
@@ -430,9 +477,16 @@ def _parse_mikrotik(text: str) -> dict[str, str] | None:
         return None
     fields: dict[str, str] = {}
     for name in _MIKROTIK_FIELDS:
+        if name == "action":
+            continue
         value = match.group(name)
         if value:
             fields[name] = value.strip()
+    verb, chain = _split_mikrotik_action(match.group("action") or "")
+    if verb:
+        fields["action"] = verb
+    if chain:
+        fields["chain"] = chain
     return fields or None
 
 

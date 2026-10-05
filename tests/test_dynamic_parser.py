@@ -390,3 +390,122 @@ def _load_events_from(tmp_path: Path, samples_dir: Path, name: str) -> list[dict
     out_dir = tmp_path / name
     run(samples_dir, out_dir)
     return _load_events(out_dir)
+
+
+def test_rt_flow_pri_and_protocol_are_both_mapped() -> None:
+    """pri lands on severity; the code path still rewrites the protocol number."""
+    line = (
+        "<14>Sep  3 09:01:02 ZZEDGE9827 RT_FLOW: RT_FLOW_SESSION_CREATE: "
+        "session created 10.55.55.55/49811->10.66.66.66/443 0x0 junos-https "
+        "10.55.55.55/49811->10.66.66.66/443 0x0 N/A N/A 6 zz-policy zzone uzone 42"
+    )
+    config = {
+        "vendor": "ZZRtFlow9827",
+        "product": "ZZSRX",
+        "mode": "rt_flow",
+        "format_hint": "syslog",
+        "field_map": {
+            "event.action": "event",
+            "event.severity": "pri",
+            "network.src_ip": "src_ip",
+            "network.dst_ip": "dst_ip",
+            "network.transport": "protocol",
+            "observer.name": "host",
+            "timestamp": "timestamp",
+        },
+        "action_rules": [],
+        "timestamp": {"keys": ["timestamp"], "format": "Mmm dd HH:MM:SS"},
+        "category": "network",
+    }
+    event = dynamic._make_structured_parser(MAPPINGS_DIR / "zzrtflow9827.yaml", config)(line, {})
+    assert event is not None
+    assert event["event.severity"] == "14"
+    assert event["network.transport"] == "tcp"
+    assert event["event.action"] == "allow"
+    assert event["event.outcome"] == "success"
+    assert "user.name" not in event
+
+
+def test_mikrotik_drop_and_accept_are_verdicts_and_chain_is_not() -> None:
+    forward = (
+        "sep/03 09:01:02 firewall,info forward: in:ether1 out:ether2, "
+        "src-mac 02:00:00:00:00:01, proto TCP (SYN), 10.7.7.7:1234->10.8.8.8:443, len 60"
+    )
+    dropped = (
+        "sep/03 09:02:02 firewall,info drop forward: in:ether2 out:(unknown 0), "
+        "src-mac 02:00:00:00:00:02, proto ICMP (type 8, code 0), 10.7.7.7->10.8.8.8, len 84"
+    )
+    accepted = (
+        "sep/03 09:04:02 firewall,info accept input: in:ether1 out:ether2, "
+        "src-mac 02:00:00:00:00:04, proto TCP (ACK), 10.7.7.7:1234->10.8.8.8:443, len 60"
+    )
+    pri = (
+        "<30>Sep  3 09:03:02 edge-test firewall,info input: in:ether1 out:ether2, "
+        "src-mac 02:00:00:00:00:03, proto UDP, 10.7.7.7:5300->10.8.8.8:53, len 72"
+    )
+    config = {
+        "vendor": "ZZMikroTik9827",
+        "product": "ZZRouterOS",
+        "mode": "mikrotik",
+        "format_hint": "routeros",
+        "field_map": {
+            "event.action": "action",
+            "event.severity": "severity",
+            "network.dst_ip": "dst_ip",
+            "network.dst_port": "dst_port",
+            "network.src_ip": "src_ip",
+            "network.src_port": "src_port",
+            "network.transport": "protocol",
+            "observer.name": "host",
+            "timestamp": "timestamp",
+        },
+        "action_rules": [],
+        "timestamp": {"keys": ["timestamp"], "format": "Mmm dd HH:MM:SS"},
+        "category": "network",
+    }
+    parse = dynamic._make_structured_parser(MAPPINGS_DIR / "zzmikrotik9827.yaml", config)
+    forwarded = parse(forward, {})
+    denied = parse(dropped, {})
+    allowed = parse(accepted, {})
+    hosted = parse(pri, {})
+    assert forwarded is not None and denied is not None and allowed is not None and hosted is not None
+
+    assert forwarded.get("event.action") in (None, "")
+    assert forwarded.get("event.outcome") in (None, "")
+    assert forwarded["unmapped"]["chain"] == "forward"
+    assert forwarded["unmapped"]["in_if"] == "ether1"
+    assert forwarded["unmapped"]["out_if"] == "ether2"
+    assert forwarded["unmapped"]["src_mac"] == "02:00:00:00:00:01"
+    assert forwarded["unmapped"]["length"] == "60"
+    assert "network.in_if" not in forwarded
+    assert "network.out_if" not in forwarded
+    assert "network.src_mac" not in forwarded
+    assert "network.length" not in forwarded
+    assert forwarded["event.severity"] == "info"
+    assert forwarded["network.transport"] == "TCP"
+
+    assert denied["event.action"] == "deny"
+    assert denied["event.outcome"] == "failure"
+    assert denied["unmapped"]["chain"] == "forward"
+    assert "action" not in denied["unmapped"]
+    assert denied["network.transport"] == "ICMP"
+
+    assert allowed["event.action"] == "allow"
+    assert allowed["event.outcome"] == "success"
+    assert allowed["unmapped"]["chain"] == "input"
+
+    assert hosted.get("event.action") in (None, "")
+    assert hosted["unmapped"]["chain"] == "input"
+    assert hosted["event.severity"] == "info"
+    assert "event.description" not in hosted
+    assert hosted["unmapped"]["pri"] == "30"
+    assert hosted["unmapped"]["length"] == "72"
+    assert hosted["unmapped"]["src_mac"] == "02:00:00:00:00:03"
+
+    # A map that points the action at the chain must not turn "forward" into allow.
+    chained = dict(config)
+    chained["field_map"] = {"event.action": "chain", "network.src_ip": "src_ip", "network.dst_ip": "dst_ip"}
+    via_chain = dynamic._make_structured_parser(MAPPINGS_DIR / "zzmikrotik9827.yaml", chained)(forward, {})
+    assert via_chain is not None
+    assert via_chain.get("event.action") not in ("allow", "forward", "input")
+    assert via_chain["unmapped"]["chain"] == "forward"

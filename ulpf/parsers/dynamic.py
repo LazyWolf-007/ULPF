@@ -11,6 +11,8 @@ unstructured fallback and is limited to 6 capture groups.
 
 `rt_flow` rewrites protocol numbers 6/17/1 to tcp/udp/icmp, and
 `RT_FLOW_SESSION_CREATE` / `RT_FLOW_SESSION_DENY` to allow / deny.
+`mikrotik` rewrites the verdict word `drop` to deny and `accept` to allow.
+The chain name (`forward`, `input`) is not an action.
 
 Configs written before `mode` existed (a `line_regex` and a `format_hint`,
 no `mode`) still load. That path is what the original dynamic-parser tests
@@ -36,6 +38,8 @@ PORT_FIELDS = {"network.src_port", "network.dst_port"}
 ALLOW_WORDS = {"allow", "allowed", "accept", "accepted"}
 DENY_WORDS = {"deny", "denied", "drop", "dropped", "block", "blocked"}
 _RT_PROTO = {"6": "tcp", "17": "udp", "1": "icmp"}
+# Chain names from a RouterOS firewall sentence. Not verdicts.
+_MT_CHAINS = frozenset({"forward", "input"})
 
 # Cache of already-built parser closures, keyed by mapping file path. This
 # is required for correctness, not just an optimization: `register()` runs
@@ -82,6 +86,26 @@ def _apply_rt_flow(event: dict[str, Any], fields: dict[str, str], used: set[str]
         event["event.action"] = "deny"
         used.add("event")
         _set_outcome(event, "deny")
+
+
+def _apply_mikrotik(event: dict[str, Any], fields: dict[str, str], used: set[str]) -> None:
+    """`drop` is deny and `accept` is allow. The chain is not an action."""
+    chain = (fields.get("chain") or "").strip().lower()
+    current = str(event.get("event.action") or "").strip().lower()
+    if current in _MT_CHAINS or (chain and current == chain):
+        event.pop("event.action", None)
+        event.pop("event.outcome", None)
+        if chain:
+            used.discard("chain")
+    verb = (fields.get("action") or "").strip().lower()
+    if verb == "drop":
+        event["event.action"] = "deny"
+        used.add("action")
+        _set_outcome(event, "deny")
+    elif verb == "accept":
+        event["event.action"] = "allow"
+        used.add("action")
+        _set_outcome(event, "allow")
 
 
 def _finish_action(event: dict[str, Any], rules: list[Any]) -> None:
@@ -164,6 +188,8 @@ def _make_structured_parser(path: Path, config: dict[str, Any]) -> ParseFn:
         _finish_action(event, action_rules)
         if mode == "rt_flow":
             _apply_rt_flow(event, fields, used)
+        elif mode == "mikrotik":
+            _apply_mikrotik(event, fields, used)
         event["unmapped"] = {
             key: value for key, value in fields.items() if key not in used
         }
