@@ -26,6 +26,22 @@ Parser modules live under `ulpf/parsers/`. Each module exposes `parse(line, mapp
 
 `ulpf/app.py` serves a read-only HTML view over an existing `events.jsonl` using the standard library HTTP server on `127.0.0.1` and a free port. It loads the file, computes summary counts and busiest source IPs in Python, and renders a filterable table. Row clicks show `provenance.raw_text` and `provenance.raw_hash`. Optional `--rebuild` re-runs the pipeline before serving; otherwise the page does not re-parse.
 
+## What the demo shows
+
+Run `python -m ulpf.pipeline samples out`, then `python -m ulpf.app out`, and open the printed URL.
+
+1. On the unfiltered table, the Cisco row is filled. Click the first red row and the original line is `this is not a log`.
+2. Click `203.0.113.5`. Fortinet deny and Palo Alto alert remain.
+3. Click the Fortinet row. The original deny line is on screen, and Palo Alto Networks is listed under Same source.
+
+A new device can be brought in without a new parser module.
+
+The model may propose a field map.
+The validator checks that map.
+A saved map replays with the model off.
+The page reads `ulpf/mappings` plus the built-in parsers.
+It does not read `demo_replay/`.
+
 ## What this prototype does not run
 
 This repository does not run Kafka, Flink, OpenSearch, or a cluster. Those are how the same ingest → detect → parse → map flow would be hosted at scale later (streaming ingest, stateful enrichment, search, and horizontal workers). The parser interface—register a handler, ship a YAML mapping, drop samples, re-run the pipeline—would stay the same; only deployment and storage backends would change.

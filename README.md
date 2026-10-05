@@ -22,6 +22,29 @@ python -m ulpf.app out
 
 The pipeline writes `out/raw.jsonl`, `out/events.jsonl`, `out/ocsf.jsonl`, and `out/quality.json`. The app prints a URL such as `http://127.0.0.1:<port>/`; open it in a browser to browse and filter events. To re-parse before serving, use `python -m ulpf.app out --rebuild` (defaults to input folder `samples`).
 
+## Demo on one laptop
+
+With the virtual environment active, from the repo root:
+
+```bash
+python -m ulpf.pipeline samples out
+python -m ulpf.app out
+```
+
+Open the local URL the app prints. On the unfiltered table, the Cisco row is filled. Click the first red row: the original line is still `this is not a log`.
+
+Click `203.0.113.5`. Fortinet deny and Palo Alto alert remain. Click the Fortinet row. The original deny line is on screen, and Palo Alto Networks is listed under Same source.
+
+Many other rows are partial. A dash means that field was not in the line.
+
+To check a saved map for a device that has no built-in parser, without calling a model:
+
+```bash
+python -m ulpf.llm.generate --replay demo_replay/sophos.yaml --samples demo_replay/sophos.log
+```
+
+The report prints `ok: True` and `score: 1.0`, and the tool says no model call was made. Type `N` at `Approve and save this mapping?`.
+
 Run tests:
 
 ```bash
